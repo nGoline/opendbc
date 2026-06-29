@@ -156,11 +156,12 @@ class CarState(CarStateBase):
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
       # MK4 runs its OWN cruise loop (pcmCruise=False): engagement + set-speed + personality come from
       # the wheel/stalk buttons, NOT the OEM ACC (which freezes its set speed once openpilot owns the car).
-      # Engagement stays on the FURTHER_DOWN stalk gesture (AP_ENABLE_COMMAND) so it matches the panda's
-      # arm latch (gwm.h reads msg 161 bit47); cruiseState.available mirrors that latch so the two safety
-      # gates never desync. (Commit B will move both to the 0xC7 GEAR_STALK gentle-DOWN signal.)
-      enable_gesture = bool(cp.vl["STEER_AND_AP_STALK"]["AP_ENABLE_COMMAND"])
-      # FURTHER_DOWN is the same physical motion as shifting N→D / R→D, so gate engagement to when the gear
+      # Engagement is the gentle-or-further DOWN stalk gesture (msg 0xC7 GEAR_STALK bit STALK_DOWN) so a
+      # gentle DOWN also engages, not just the hard FURTHER_DOWN detent. The panda arms its controls latch
+      # on the same bit (gwm.h, gated on GwmSafetyFlags.OP_CRUISE); cruiseState.available mirrors our latch
+      # so the two safety gates never desync.
+      enable_gesture = bool(cp.vl["GEAR_STALK"]["STALK_DOWN"])
+      # DOWN is the same physical motion as shifting N→D / R→D, so gate engagement to when the gear
       # is already D (this frame and last) and the car is moving — a gear shift must not auto-engage. Latch
       # the decision at the gesture's rising edge so it holds for the whole press.
       gear_d = drive_mode == 1 and self.prev_drive_mode == 1

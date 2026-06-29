@@ -41,6 +41,9 @@ class CarControllerParams:
 
 class GwmSafetyFlags(IntFlag):
   LONG_CONTROL = 1
+  # MK4 owns its own cruise loop (pcmCruise=False). The panda must arm controls on the gentle-DOWN stalk
+  # gesture (msg 0xC7 GEAR_STALK), not the FURTHER_DOWN-only msg 161 bit47 the MK3 path uses.
+  OP_CRUISE = 2
 
 
 @dataclass
