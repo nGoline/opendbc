@@ -1,4 +1,4 @@
-from opendbc.car import Bus, CanBusBase, structs
+from opendbc.car import Bus, CanBusBase, create_button_events, structs
 from opendbc.can.parser import CANParser
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
@@ -7,6 +7,7 @@ import copy
 
 GearShifter = structs.CarState.GearShifter
 TransmissionType = structs.CarParams.TransmissionType
+ButtonType = structs.CarState.ButtonEvent.Type
 
 
 class CarState(CarStateBase):
@@ -23,6 +24,17 @@ class CarState(CarStateBase):
     self.prev_activation_lever_pulled = False
     self.main_on = False
     self.regen_level = 16  # MK4 driver regen-level selector (msg 726 REGEN_LEVEL): 8=Normal, 16=Low, 24=Heavy. Default Low.
+
+    # MK4 own-cruise (pcmCruise=False) button/engage state (see update()).
+    self.prev_enable_gesture = False
+    self.engage_latch = False
+    self.prev_engage = 0
+    self.prev_speed_up = 0
+    self.prev_speed_down = 0
+    self.prev_dist_up = 0
+    self.prev_dist_down = 0
+    self.prev_cancel = 0
+    self.prev_drive_mode = -1
 
   def update(self, can_parsers) -> structs.CarState:
     cp = can_parsers[Bus.main]
@@ -137,19 +149,59 @@ class CarState(CarStateBase):
     ret.leftBlindspot = bool(cp.vl["RADAR_BEHIND"]["BSM_LEFT"] > 0)
     ret.rightBlindspot = bool(cp.vl["RADAR_BEHIND"]["BSM_RIGHT"] > 0)
 
-    if cp.vl["STEER_AND_AP_STALK"]["AP_CANCEL_COMMAND"] or ret.brakePressed:
+    cancel = bool(cp.vl["STEER_AND_AP_STALK"]["AP_CANCEL_COMMAND"])
+    if cancel or ret.brakePressed:
       self.main_on = False
-    self.is_activation_lever_pulled = bool(cp.vl["STEER_AND_AP_STALK"]["AP_ENABLE_COMMAND"])
-    # MK4: the FURTHER_DOWN stalk gesture activates ACC but is the same physical motion as
-    # shifting gears (N→D, R→D). Require the car to already be moving so gear shifts
-    # from standstill don't accidentally engage openpilot.
-    if not self.is_activation_lever_pulled and self.prev_activation_lever_pulled and not self.main_on:
-      if self.CP.carFingerprint != CAR.GWM_HAVAL_H6_MK4 or abs(ret.vEgoRaw) > 0.5:
-        self.main_on = True
-    self.prev_activation_lever_pulled = self.is_activation_lever_pulled
 
-    ret.cruiseState.available = self.main_on
-    ret.cruiseState.enabled = self.main_on
+    if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
+      # MK4 runs its OWN cruise loop (pcmCruise=False): engagement + set-speed + personality come from
+      # the wheel/stalk buttons, NOT the OEM ACC (which freezes its set speed once openpilot owns the car).
+      # Engagement stays on the FURTHER_DOWN stalk gesture (AP_ENABLE_COMMAND) so it matches the panda's
+      # arm latch (gwm.h reads msg 161 bit47); cruiseState.available mirrors that latch so the two safety
+      # gates never desync. (Commit B will move both to the 0xC7 GEAR_STALK gentle-DOWN signal.)
+      enable_gesture = bool(cp.vl["STEER_AND_AP_STALK"]["AP_ENABLE_COMMAND"])
+      # FURTHER_DOWN is the same physical motion as shifting N→D / R→D, so gate engagement to when the gear
+      # is already D (this frame and last) and the car is moving — a gear shift must not auto-engage. Latch
+      # the decision at the gesture's rising edge so it holds for the whole press.
+      gear_d = drive_mode == 1 and self.prev_drive_mode == 1
+      if enable_gesture and not self.prev_enable_gesture:
+        self.engage_latch = gear_d and abs(ret.vEgoRaw) > 0.5
+      engage = int(enable_gesture and self.engage_latch)
+      if engage and not self.prev_engage:
+        self.main_on = True
+
+      # Wheel scroll = set-speed +/- (VCruiseHelper handles the ±5 km/h step when enabled, and the first
+      # press initializes the set speed from vEgo without stepping). Wheel follow-distance buttons cycle
+      # the openpilot personality via gapAdjustCruise. Stalk UP / lateral button cancels.
+      speed_up = int(cp.vl["WHEEL_ACC_BUTTONS"]["AP_INCREASE_SPEED_COMMAND"])
+      speed_down = int(cp.vl["WHEEL_ACC_BUTTONS"]["AP_DECREASE_SPEED_COMMAND"])
+      dist_up = int(cp.vl["STEER_AND_AP_STALK"]["AP_INCREASE_DISTANCE_COMMAND"])
+      dist_down = int(cp.vl["STEER_AND_AP_STALK"]["AP_REDUCE_DISTANCE_COMMAND"])
+      ret.buttonEvents = [
+        *create_button_events(engage, self.prev_engage, {1: ButtonType.decelCruise}),
+        *create_button_events(speed_up, self.prev_speed_up, {1: ButtonType.accelCruise}),
+        *create_button_events(speed_down, self.prev_speed_down, {1: ButtonType.decelCruise}),
+        *create_button_events(dist_up, self.prev_dist_up, {1: ButtonType.gapAdjustCruise}),
+        *create_button_events(dist_down, self.prev_dist_down, {1: ButtonType.gapAdjustCruise}),
+        *create_button_events(int(cancel), self.prev_cancel, {1: ButtonType.cancel}),
+      ]
+      self.prev_enable_gesture = enable_gesture
+      self.prev_engage = engage
+      self.prev_speed_up, self.prev_speed_down = speed_up, speed_down
+      self.prev_dist_up, self.prev_dist_down = dist_up, dist_down
+      self.prev_cancel = int(cancel)
+      self.prev_drive_mode = drive_mode
+
+      ret.cruiseState.available = self.main_on
+      # pcmCruise=False: selfdrived owns cruiseState.enabled — don't set it here.
+    else:
+      # MK3 (unchanged): pcmCruise=True, engage latch off the AP_ENABLE stalk gesture's falling edge.
+      self.is_activation_lever_pulled = bool(cp.vl["STEER_AND_AP_STALK"]["AP_ENABLE_COMMAND"])
+      if not self.is_activation_lever_pulled and self.prev_activation_lever_pulled and not self.main_on:
+        self.main_on = True
+      self.prev_activation_lever_pulled = self.is_activation_lever_pulled
+      ret.cruiseState.available = self.main_on
+      ret.cruiseState.enabled = self.main_on
 
     return ret
 

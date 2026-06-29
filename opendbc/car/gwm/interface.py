@@ -68,15 +68,11 @@ class CarInterface(CarInterfaceBase):
     ret = super().update(can_packets)
     ret.steerFaultTemporary |= self.steer_fault_temporary_counter > 100
 
-    # Sync openpilot driving personality with the car's follow-distance selection.
-    if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
-      DASH_TO_PERSONALITY = {1: 0, 2: 1, 3: 1, 4: 2}
-      sel = int(self.pcm_follow_distance)
-      if sel in DASH_TO_PERSONALITY and sel != self.prev_pcm_follow_distance:
-        self.prev_pcm_follow_distance = sel
-        if self.params is not None:
-          self.params.put_nonblocking('LongitudinalPersonality', DASH_TO_PERSONALITY[sel])
-    else:
+    # Driving personality:
+    #  - MK4: cycled by the wheel follow-distance buttons -> gapAdjustCruise buttonEvents built in carstate
+    #    (the OEM CAR_DISTANCE_SELECTION dash goes stale once openpilot owns the car, so we no longer mirror it).
+    #  - MK3: mirror the OEM follow-distance dash via a gapAdjustCruise toggle.
+    if self.CP.carFingerprint != CAR.GWM_HAVAL_H6_MK4:
       if self.pcm_follow_distance != self.prev_pcm_follow_distance:
         if (self.pcm_follow_distance == 4 and self.current_personality != 3) or \
            (self.pcm_follow_distance == 3 and self.current_personality != 3) or \
@@ -114,6 +110,9 @@ class CarInterface(CarInterfaceBase):
       # call update_live_torque_params on LatControlAngle which doesn't implement it.
       ret.steerControlType = SteerControlType.angle
       ret.steerActuatorDelay = 0.08
+      # MK4 owns its own cruise loop: the OEM ACC freezes its set speed once openpilot drives, so don't
+      # follow it. openpilot manages engagement + set-speed from the wheel buttons (carstate buttonEvents).
+      ret.pcmCruise = False
     else:
       ret.steerControlType = structs.CarParams.SteerControlType.torque
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
