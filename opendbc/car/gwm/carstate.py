@@ -9,6 +9,17 @@ GearShifter = structs.CarState.GearShifter
 TransmissionType = structs.CarParams.TransmissionType
 ButtonType = structs.CarState.ButtonEvent.Type
 
+# MK4 wheel scroll is a momentary ~50 ms click (WHEEL_ACC_BUTTONS byte2, decoded from route 00000101), so the
+# shared VCruiseHelper only ever sees a short press = +/-1 km/h. To match the OEM's +/-5 step WITHOUT editing
+# shared code, we stretch each click into a synthetic long-press: VCruiseHelper applies +/-5 once its press
+# timer crosses CRUISE_LONG_PRESS (50 frames). Holding the synthetic press for 54 frames crosses exactly one
+# boundary (one +/-5) and releases in the safe window (timer > 50) so it does NOT also register a spurious +1.
+# A new click while still held adds another 50-frame cycle, so rapid clicks accumulate (3 quick clicks -> +/-15).
+# There is no separate wheel button on the tapped buses to key this off. Validated offline vs the real
+# VCruiseHelper. Cost: the step lands ~0.5 s after the click (the long-press threshold). MK4-only.
+MK4_CRUISE_LONG_PRESS = 50  # mirrors CRUISE_LONG_PRESS in selfdrive/car/cruise.py
+MK4_SCROLL_HOLD = MK4_CRUISE_LONG_PRESS + 4  # 54
+
 
 class CarState(CarStateBase):
   def __init__(self, CP):
@@ -31,6 +42,11 @@ class CarState(CarStateBase):
     self.prev_engage = 0
     self.prev_speed_up = 0
     self.prev_speed_down = 0
+    # synthetic long-press latch so a momentary scroll click steps +/-5 km/h (see MK4_SCROLL_HOLD)
+    self.prev_raw_speed_up = 0
+    self.prev_raw_speed_down = 0
+    self.scroll_up_hold = 0
+    self.scroll_down_hold = 0
     self.prev_dist_up = 0
     self.prev_dist_down = 0
     self.prev_cancel = 0
@@ -171,11 +187,22 @@ class CarState(CarStateBase):
       if engage and not self.prev_engage:
         self.main_on = True
 
-      # Wheel scroll = set-speed +/- (VCruiseHelper handles the ±5 km/h step when enabled, and the first
-      # press initializes the set speed from vEgo without stepping). Wheel follow-distance buttons cycle
-      # the openpilot personality via gapAdjustCruise. Stalk UP / lateral button cancels.
-      speed_up = int(cp.vl["WHEEL_ACC_BUTTONS"]["AP_INCREASE_SPEED_COMMAND"])
-      speed_down = int(cp.vl["WHEEL_ACC_BUTTONS"]["AP_DECREASE_SPEED_COMMAND"])
+      # Wheel scroll = set-speed +/-. Each momentary click is stretched into a synthetic long-press so
+      # VCruiseHelper steps +/-5 km/h (see MK4_SCROLL_HOLD); a click while still held adds another cycle so
+      # rapid clicks accumulate. The latched speed_up/speed_down (not the raw click) are what we emit. The
+      # first press still initializes the set speed from vEgo without stepping. Wheel follow-distance buttons
+      # cycle the openpilot personality via gapAdjustCruise. Stalk UP / lateral button cancels.
+      raw_speed_up = int(cp.vl["WHEEL_ACC_BUTTONS"]["AP_INCREASE_SPEED_COMMAND"])
+      raw_speed_down = int(cp.vl["WHEEL_ACC_BUTTONS"]["AP_DECREASE_SPEED_COMMAND"])
+      if raw_speed_up and not self.prev_raw_speed_up:
+        self.scroll_up_hold = MK4_SCROLL_HOLD if self.scroll_up_hold <= 0 else self.scroll_up_hold + MK4_CRUISE_LONG_PRESS
+      if raw_speed_down and not self.prev_raw_speed_down:
+        self.scroll_down_hold = MK4_SCROLL_HOLD if self.scroll_down_hold <= 0 else self.scroll_down_hold + MK4_CRUISE_LONG_PRESS
+      self.prev_raw_speed_up, self.prev_raw_speed_down = raw_speed_up, raw_speed_down
+      speed_up = int(self.scroll_up_hold > 0)
+      speed_down = int(self.scroll_down_hold > 0)
+      self.scroll_up_hold = max(0, self.scroll_up_hold - 1)
+      self.scroll_down_hold = max(0, self.scroll_down_hold - 1)
       dist_up = int(cp.vl["STEER_AND_AP_STALK"]["AP_INCREASE_DISTANCE_COMMAND"])
       dist_down = int(cp.vl["STEER_AND_AP_STALK"]["AP_REDUCE_DISTANCE_COMMAND"])
       ret.buttonEvents = [
