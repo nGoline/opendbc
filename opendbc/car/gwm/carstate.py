@@ -29,6 +29,7 @@ class CarState(CarStateBase):
     self.camera_stock_values = {}
     self.longitudinal_stock_values = {}
     self.hud_stock_values = {}
+    self.acc_stock_values = {}
     self.steer_fault_temporary_counter = 0
 
     self.is_activation_lever_pulled = False
@@ -62,6 +63,7 @@ class CarState(CarStateBase):
     self.camera_stock_values = copy.copy(cp_cam.vl["STEER_CMD"])
     self.longitudinal_stock_values = copy.copy(cp_cam.vl["ACC_CMD"])
     self.hud_stock_values = copy.copy(cp_cam.vl["LATERAL_STATE"])
+    self.acc_stock_values = copy.copy(cp_cam.vl["ACC"])  # MK4: rebuilt toward the cluster for the set-speed display
 
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
       # Driver's regen-level setting; carcontroller uses it to set the regen brake-state entry threshold.

@@ -181,6 +181,7 @@ static safety_config gwm_init(uint16_t param) {
     {GWM_RX_STEER_RELATED, GWM_CAMERA_BUS, 64, .check_relay = true}, // EPS steering feedback to camera
     {GWM_STEER_CMD, GWM_MAIN_BUS, 64, .check_relay = true}, // Steering command
     {GWM_HUD, GWM_MAIN_BUS, 64, .check_relay = true}, // HUD and dashboard
+    {GWM_CRUISE, GWM_MAIN_BUS, 64, .check_relay = true}, // MK4: ACC display (set-speed) rebuilt toward cluster
   };
 
   static const CanMsg GWM_LONG_TX_MSGS[] = {
@@ -189,6 +190,7 @@ static safety_config gwm_init(uint16_t param) {
     {GWM_STEER_CMD, GWM_MAIN_BUS, 64, .check_relay = true}, // Steering command
     {GWM_LONG_CONTROL, GWM_MAIN_BUS, 64, .check_relay = true}, // Longitudinal control message from camera
     {GWM_HUD, GWM_MAIN_BUS, 64, .check_relay = true}, // HUD and dashboard
+    {GWM_CRUISE, GWM_MAIN_BUS, 64, .check_relay = true}, // MK4: ACC display (set-speed) rebuilt toward cluster
   };
 
   static RxCheck gwm_rx_checks[] = {

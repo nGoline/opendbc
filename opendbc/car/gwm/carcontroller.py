@@ -13,6 +13,10 @@ LongCtrlState = structs.CarControl.Actuators.LongControlState
 
 MAX_USER_TORQUE = 100  # 1.0 Nm
 
+# MK4 cluster set-speed display experiment: a deliberately distinct value so one glance at the dash tells us
+# whether the forged msg 683 drives the cluster, independent of whether the real set speed is plumbed right.
+MK4_ACC_DISPLAY_TEST_SPEED = 88  # km/h
+
 # MK4 override thresholds, grounded in the stock LKAS: while steering the OEM tolerates driver torque
 # up to ~67 routinely (p90) and only hands off around ~102 (median), ignoring brief spikes to ~156 (p99).
 # Our old fixed >50 instant release was HALF that, so resting-hand contact flapped lateral on/off and
@@ -56,6 +60,7 @@ class CarController(CarControllerBase):
     self.override_counter = 0
     self.override_hold = 0         # MK4: frames remaining in the post-override OEM-style hold-off
     self.regen_brake = False       # MK4: debounced "real braking" latch for the regen brake-state bit
+    self.acc_display_counter = 0   # MK4: our own running counter for the rebuilt ACC display (msg 683)
 
   def update(self, CC, CS, now_nanos):
     can_sends = []
@@ -178,6 +183,22 @@ class CarController(CarControllerBase):
         hud_stock_values=CS.hud_stock_values,
         steer_required=CC.latActive,
         is_mk4=self.is_mk4,
+      ))
+
+    # MK4: cluster set-speed display. Panda claims msg 683 (check_relay), so once that's flashed the camera's
+    # copy is blocked from the cluster and we MUST send this every cycle (forward stock when not overriding),
+    # matching the ~10 Hz camera rate so the passed-through counters stay continuous.
+    # EXPERIMENT: force CRUISE_STATE_2=3 + a DISTINCT 88 km/h while engaged, to confirm the cluster actually
+    # renders our forged 683. Once confirmed, swap MK4_ACC_DISPLAY_TEST_SPEED for CC.hudControl.setSpeed.
+    if self.is_mk4 and self.frame % 10 == 0:  # 10 Hz, matches the camera's ACC rate
+      self.acc_display_counter = (self.acc_display_counter + 1) % 16
+      can_sends.append(gwmcan.create_acc_display(
+        self.packer,
+        self.CAN,
+        acc_stock_values=CS.acc_stock_values,
+        counter=self.acc_display_counter,
+        override=CC.enabled,
+        set_speed_kph=MK4_ACC_DISPLAY_TEST_SPEED,
       ))
 
     new_actuators = actuators.as_builder()
