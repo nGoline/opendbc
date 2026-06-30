@@ -16,6 +16,12 @@ TransmissionType = structs.CarParams.TransmissionType
 # the wheel hasn't been grabbed recently. A genuine hands-off limp keeps driver torque ~0.
 MK4_GRAB_TORQUE = 80          # |driver torque| marking a deliberate hands-on override
 MK4_GRAB_HOLD_FRAMES = 150    # ~1.5 s: keep treating the wheel as hands-on after the last grab
+# A_RX==2 is NOT sufficient for a fault: at highway speed the EPS flips it to 2 for ~1 s while still executing
+# the command hands-off (route 103 seg10/11/12: A_RX=2 ~1 s, |actual-command| <= 0.6 deg, torque < 17 -> a
+# spurious "TAKE CONTROL"). A genuine limp/override has the wheel DIVERGING from the command (seg20: 8.4 deg),
+# so also require a real tracking error before counting a fault. Threshold clears the ~0.6 deg false-fire band
+# (and the ~2.4 deg worst-case actuator-delay lag) with margin, well below a real divergence.
+MK4_ANGLE_TRACK_ERR = 3.0     # deg; |steeringAngleDeg - commanded apply_angle| above this = wheel genuinely off-command
 
 
 class CarInterface(CarInterfaceBase):
@@ -28,6 +34,7 @@ class CarInterface(CarInterfaceBase):
       self.isEPSobeying = True
       self.steer_fault_temporary_counter = 0
       self.recent_grab = 0    # MK4: frames remaining in the hands-on hold-off (see MK4_GRAB_* above)
+      self.last_commanded_angle = 0.0    # MK4: last apply_angle, for the tracking-error fault gate
       self.current_personality = 0
       self.pcm_follow_distance = 0
       self.prev_pcm_follow_distance = -1
@@ -44,6 +51,7 @@ class CarInterface(CarInterfaceBase):
 
   def apply(self, CC, now_nanos):
     self.lat_active = CC.latActive
+    self.last_commanded_angle = CC.actuators.steeringAngleDeg
     hud_control = CC.hudControl
     self.current_personality = hud_control.leadDistanceBars
     return super().apply(CC, now_nanos)
@@ -51,21 +59,27 @@ class CarInterface(CarInterfaceBase):
   def update(self, can_packets):
     cp = self.can_parsers[Bus.main]
     self.isEPSobeying = cp.vl["RX_STEER_RELATED"]["A_RX_STEER_REQUESTED"] == 1
-    if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
-      # Suppress the fault while the driver is overriding (recent grab) — see MK4_GRAB_* note above.
-      driver_torque = cp.vl["RX_STEER_RELATED"]["B_RX_DRIVER_TORQUE"]
-      self.recent_grab = MK4_GRAB_HOLD_FRAMES if abs(driver_torque) > MK4_GRAB_TORQUE else max(0, self.recent_grab - 1)
-      hands_on = self.recent_grab > 0
-      self.steer_fault_temporary_counter = (self.steer_fault_temporary_counter + 1) \
-                                            if (self.lat_active and not self.isEPSobeying and not hands_on) else 0
-    else:
-      self.steer_fault_temporary_counter = (self.steer_fault_temporary_counter + 1) if (self.lat_active and not self.isEPSobeying) \
-                                            else 0
 
     cp_cam = self.can_parsers[Bus.cam]
     self.pcm_follow_distance = cp_cam.vl["ACC"]["CAR_DISTANCE_SELECTION"]
 
     ret = super().update(can_packets)
+
+    # steerTempUnavailable: count a fault only when the EPS stops obeying AND it isn't the driver's doing.
+    if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
+      # (a) wheel wasn't grabbed recently (hands-off override hold-off — see MK4_GRAB_* note above), and
+      # (b) the wheel is actually diverging from the command (a genuine limp/override drifts off; a spurious
+      #     highway A_RX==2 stays glued to it — see MK4_ANGLE_TRACK_ERR note above). Both gates required.
+      driver_torque = cp.vl["RX_STEER_RELATED"]["B_RX_DRIVER_TORQUE"]
+      self.recent_grab = MK4_GRAB_HOLD_FRAMES if abs(driver_torque) > MK4_GRAB_TORQUE else max(0, self.recent_grab - 1)
+      hands_on = self.recent_grab > 0
+      not_tracking = abs(ret.steeringAngleDeg - self.last_commanded_angle) > MK4_ANGLE_TRACK_ERR
+      self.steer_fault_temporary_counter = (self.steer_fault_temporary_counter + 1) \
+                                            if (self.lat_active and not self.isEPSobeying and not hands_on and not_tracking) else 0
+    else:
+      self.steer_fault_temporary_counter = (self.steer_fault_temporary_counter + 1) if (self.lat_active and not self.isEPSobeying) \
+                                            else 0
+
     ret.steerFaultTemporary |= self.steer_fault_temporary_counter > 100
 
     # Driving personality:
