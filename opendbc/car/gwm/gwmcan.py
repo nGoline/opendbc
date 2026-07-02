@@ -284,43 +284,6 @@ def create_hud_command(packer, CAN: CanBus, hud_stock_values, steer_required, is
   return packer.make_can_msg("LATERAL_STATE", CAN.main, values)
 
 
-# MK4 ACC-display (msg 683 / 0x2AB). Once openpilot claims this on the main bus (panda check_relay), the
-# camera's copy is blocked from the cluster, so we MUST rebuild + send every frame, forwarding all stock
-# content and only overriding the fields that drive the dash set-speed readout. The cluster gates the
-# set-speed number on CRUISE_STATE_2 == 3 ("ACC active") — the OEM ACC sits dormant (state 1/2) while
-# openpilot owns the loop, so writing ACC_SPEED_SELECTION alone shows nothing; we also force the state.
-# Both CRUISE_STATE_2 (byte18) and ACC_SPEED_SELECTION (byte22) live in CRC1's window [17:24], so one CRC1
-# recompute covers both. The separate byte8 CRC over [9:16] is untouched (passed through via the bypass
-# tiling). Round-trip verified byte-identical vs OEM frames (no-override) over 2408 frames.
-# Everything except the two CRCs (recomputed) and the two counters (owned by us, see below).
-ACC_DISPLAY_PASSTHROUGH = [
-  "CRUISE_STATE_2", "CAR_DISTANCE_SELECTION", "ACC_SPEED_SELECTION",
-  "ACC_BYPASS_00", "ACC_BYPASS_04", "ACC_CRC8", "ACC_BYPASS_09", "ACC_BYPASS_12", "ACC_BYPASS_15H",
-  "ACC_BYPASS_17", "ACC_BYPASS_18H", "ACC_BYPASS_18L", "ACC_BYPASS_19", "ACC_BYPASS_21H",
-  "ACC_BYPASS_23H", "ACC_BYPASS_24", "ACC_BYPASS_28", "ACC_BYPASS_32", "ACC_BYPASS_36",
-  "ACC_BYPASS_40", "ACC_BYPASS_44", "ACC_BYPASS_48", "ACC_BYPASS_52", "ACC_BYPASS_56", "ACC_BYPASS_60",
-]
-
-
-def create_acc_display(packer, CAN: CanBus, acc_stock_values, counter: int, override: bool, set_speed_kph: int):
-  # Panda blocks the camera's 683 from the cluster (check_relay), so the cluster only ever sees OUR frames.
-  # We therefore own the counter: COUNTER1 == COUNTER2 == our running counter (OEM behaviour, verified), so it
-  # stays continuous regardless of our send phase vs the camera. Two CRCs: ACC_CRC8 (byte8) over [9:16] covers
-  # COUNTER1; CRC1 (byte16) over [17:24] covers COUNTER2 + CRUISE_STATE_2 + ACC_SPEED_SELECTION.
-  values = {s: acc_stock_values[s] for s in ACC_DISPLAY_PASSTHROUGH}
-  values["COUNTER1"] = counter
-  values["COUNTER2"] = counter
-  if override:
-    values["CRUISE_STATE_2"] = 3                                  # "ACC active" -> un-gate the dash readout
-    values["ACC_SPEED_SELECTION"] = int(max(0, min(254, set_speed_kph)))  # 255/0xFF is the OEM "off" sentinel
-
-  dat = packer.make_can_msg("ACC", 0, values)[1]
-  values["ACC_CRC8"] = checksum(dat[9:16], 0x25)
-  dat = packer.make_can_msg("ACC", 0, values)[1]
-  values["CRC1"] = checksum(dat[17:24], 0x40)
-  return packer.make_can_msg("ACC", CAN.main, values)
-
-
 def checksum(data, xor_output):
   crc = 0
   for byte in data:
