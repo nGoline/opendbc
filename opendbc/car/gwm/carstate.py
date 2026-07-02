@@ -26,6 +26,7 @@ class CarState(CarStateBase):
     super().__init__(CP)
     self.steer_and_ap_stalk_msg = {}
     self.eps_stock_values = {}
+    self.eps_stock_raw = None  # MK4: raw bytes of the last EPS RX_STEER_RELATED (0x147) frame, for the camera hands-on keepalive
     self.camera_stock_values = {}
     self.longitudinal_stock_values = {}
     self.hud_stock_values = {}
