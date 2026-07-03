@@ -51,6 +51,17 @@ class CarInterface(CarInterfaceBase):
   def update(self, can_packets):
     cp = self.can_parsers[Bus.main]
     self.isEPSobeying = cp.vl["RX_STEER_RELATED"]["A_RX_STEER_REQUESTED"] == 1
+
+    # MK4: stash the raw EPS RX_STEER_RELATED (0x147) frame off the main bus so the carcontroller can re-transmit
+    # it to the camera (hands-on keepalive). The DBC doesn't model the whole 64-byte frame, so we forward raw
+    # bytes and patch only the driver-torque field there (see gwmcan.create_wheel_touch_mk4). can_packets is a
+    # list of (nanos, [(address, dat, src), ...]) tuples (see can_capnp_to_list) -- index, don't attribute.
+    if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
+      for _, msgs in can_packets:
+        for address, dat, src in msgs:
+          if address == 0x147 and src == 0:
+            self.CS.eps_stock_raw = bytes(dat)
+
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
       # Suppress the fault while the driver is overriding (recent grab) — see MK4_GRAB_* note above.
       driver_torque = cp.vl["RX_STEER_RELATED"]["B_RX_DRIVER_TORQUE"]

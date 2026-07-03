@@ -208,6 +208,25 @@ def create_wheel_touch(packer, CAN: CanBus, eps_stock_values, ea_simulated_torqu
   return packer.make_can_msg("RX_STEER_RELATED", CAN.camera, values)
 
 
+def create_wheel_touch_mk4(CAN: CanBus, eps_stock_raw: bytes, spoof_torque: int):
+  """MK4 hands-on keepalive. Re-transmit the EPS RX_STEER_RELATED (0x147) frame to the CAMERA bus with a
+  spoofed driver torque, so the stock ADAS never enters its hands-off "hold the wheel" warning + safe-stop
+  escalation (msg 683 byte5) and never limps the EPS mid-drive. comma's driver-monitoring camera is the real
+  attention monitor (standard openpilot practice). The MK3 torque path does the equivalent via
+  create_wheel_touch; MK4 uses the angle path and the MK4 DBC models only part of the 64-byte 0x147 frame, so
+  we patch the RAW bytes and leave the unmodeled sub-blocks intact:
+    B_RX_DRIVER_TORQUE = ((byte9 & 0x7F) << 4) | (byte10 >> 4), 11-bit signed  (verified vs CANParser)
+    B_CRC_X61 (byte8)  = crc over bytes[9:16]  (same as create_wheel_touch)
+  Only bytes 8/9/10 change. Sent to the camera bus only -- openpilot still reads the REAL driver torque from the
+  main bus (0x147 there is untouched), so its override / steeringPressed logic is unaffected."""
+  b = bytearray(eps_stock_raw)
+  r = int(spoof_torque) & 0x7FF                       # 11-bit two's complement
+  b[9] = (b[9] & 0x80) | ((r >> 4) & 0x7F)            # preserve bit79 (B_BYPASSME_1)
+  b[10] = (b[10] & 0x0F) | ((r & 0x0F) << 4)          # preserve low nibble
+  b[8] = checksum(bytes(b[9:16]), 0x61)               # recompute B-half CRC over the patched bytes
+  return 0x147, bytes(b), CAN.camera
+
+
 def create_buttons_command(packer, CAN: CanBus, counter, stock_msg, cancel_command=False):
   # AP_DECREASE_SPEED_COMMAND / AP_INCREASE_SPEED_COMMAND only exist on the MK3
   # STEER_AND_AP_STALK DBC, not MK4. Reading them unconditionally raised KeyError on MK4

@@ -13,6 +13,14 @@ LongCtrlState = structs.CarControl.Actuators.LongControlState
 
 MAX_USER_TORQUE = 100  # 1.0 Nm
 
+# MK4 hands-on keepalive: driver torque we spoof to the camera/ADAS (via 0x147 on the camera bus) so it never
+# runs its hands-off "hold the wheel" warning + safe-stop escalation (decoded as msg 683 byte5, drives 108/109),
+# letting the driver keep hands off on the highway like other openpilot cars. comma's DM camera is the attention
+# monitor. Floor magnitude sits clearly above the stock hands-off band (stock warns while |torque| < ~18) and
+# below our override gate (120); the real torque passes through when the driver actually grabs. Tunable on-road:
+# raise if the warning still fires, lower if the ADAS flags implausible torque.
+MK4_HANDS_ON_TORQUE = 65
+
 # MK4 override thresholds, grounded in the stock LKAS: while steering the OEM tolerates driver torque
 # up to ~67 routinely (p90) and only hands off around ~102 (median), ignoring brief spikes to ~156 (p99).
 # Our old fixed >50 instant release was HALF that, so resting-hand contact flapped lateral on/off and
@@ -116,6 +124,17 @@ class CarController(CarControllerBase):
           lat_active=lat_active,
         ))
         self.apply_angle_last = apply_angle
+
+        # MK4 hands-on keepalive: re-transmit the EPS 0x147 frame to the camera with a spoofed hands-on torque
+        # (see MK4_HANDS_ON_TORQUE) so the ADAS never enters its hands-off warning/safe-stop escalation and the
+        # EPS doesn't limp mid-drive. Follow the commanded steer direction; let a real driver grab pass through.
+        # Only while engaged (relay closed): when disengaged the stock 0x147 reaches the camera directly, so a
+        # spoofed copy would double it. gate on CC.enabled.
+        if CC.enabled and CS.eps_stock_raw is not None:
+          spoof_torque = MK4_HANDS_ON_TORQUE if apply_angle >= 0 else -MK4_HANDS_ON_TORQUE
+          if abs(CS.out.steeringTorque) > MK4_HANDS_ON_TORQUE:
+            spoof_torque = int(CS.out.steeringTorque)
+          can_sends.append(gwmcan.create_wheel_touch_mk4(self.CAN, CS.eps_stock_raw, spoof_torque))
       else:
         new_torque = int(round(actuators.torque * self.params.STEER_MAX))
         apply_torque = apply_meas_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorqueEps, self.params)
