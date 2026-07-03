@@ -94,15 +94,12 @@ def create_steer_command(packer, CAN: CanBus, camera_stock_values, steer: float,
 
 
 def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, active, standstill, is_mk4: bool, regen: bool = False, braking: bool | None = None):
-  values = {s: longitudinal_stock_values[s] for s in [
-    "BRAKE_GAS_STATE_2",
-    "SPEED_REAL",
-    "COUNTER_BRAKE",
-    "BYPASSME_2",
-    "BYPASS_ACC1",
-    "BRAKE_GAS_STATE",
-    "COUNTER_ACC",
-  ]}
+  # the powertrain brake-vs-gas state fields were renamed in the MK4 DBC; the MK3 DBC still calls
+  # them BYPASSME_1 / BYPASS_ACC2 — reading the MK4 names unconditionally raised KeyError on MK3
+  # (same crash class create_buttons_command already guards against, in the other direction)
+  passthrough = ["SPEED_REAL", "COUNTER_BRAKE", "BYPASSME_2", "BYPASS_ACC1", "COUNTER_ACC"]
+  passthrough += ["BRAKE_GAS_STATE_2", "BRAKE_GAS_STATE"] if is_mk4 else ["BYPASSME_1", "BYPASS_ACC2"]
+  values = {s: longitudinal_stock_values[s] for s in passthrough}
 
   # `braking` is the gas<->brake decision. MK4 computes it in carcontroller with a lift-off threshold + hysteresis
   # (regen-lead); MK3 and any legacy caller falls back to the raw sign of accel (unchanged behavior).

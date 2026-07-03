@@ -35,9 +35,10 @@ MK4_HANDS_ON_ANGLE_GAIN = 8    # extra spoofed torque per deg of |apply_angle| (
 OVERRIDE_TORQUE = 100          # sustained |driver torque| to hand off (was 120; = MK3 MAX_USER_TORQUE).
 OVERRIDE_INSTANT_TORQUE = 150  # firm deliberate grab -> release within one frame for a clean takeover (was 250)
 OVERRIDE_FRAMES = 7            # ~70 ms sustained @100 Hz before engaging override; tolerates brief spikes
-OVERRIDE_HOLD_FRAMES = 100     # once overridden, stay handed-off ~1.0 s before re-asserting, like the OEM LKAS.
-                               # The old latch re-asserted the instant torque dipped, so openpilot grabbed back
-                               # "several times a second". The OEM waits ~1 s before trying again; this hold matches that and stops the flapping.
+# Once overridden, stay handed-off ~1.0 s before re-asserting, like the OEM LKAS. The old latch
+# re-asserted the instant torque dipped, so openpilot grabbed back "several times a second"; the
+# OEM waits ~1 s before trying again — this hold matches that and stops the flapping.
+OVERRIDE_HOLD_FRAMES = 100
 
 
 # MK4 regen-lead: every real braking demand recovers energy (regen state bit ON), not just deep braking. The old
