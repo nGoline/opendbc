@@ -140,6 +140,8 @@ class CarInterface(CarInterfaceBase):
       # Tell the panda to arm controls off the gentle-DOWN stalk gesture (0xC7 GEAR_STALK) instead of the
       # FURTHER_DOWN-only msg 161 bit47 — matches the engage source in carstate so the two gates stay in sync.
       ret.safetyConfigs[-1].safetyParam |= GwmSafetyFlags.OP_CRUISE.value
+      # Validate the 14-bit angle command in the panda (lateral accel/jerk limits via the vehicle model)
+      ret.safetyConfigs[-1].safetyParam |= GwmSafetyFlags.ANGLE_CONTROL.value
     else:
       ret.steerControlType = structs.CarParams.SteerControlType.torque
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)

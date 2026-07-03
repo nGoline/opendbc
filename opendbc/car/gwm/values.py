@@ -44,6 +44,9 @@ class GwmSafetyFlags(IntFlag):
   # MK4 owns its own cruise loop (pcmCruise=False). The panda must arm controls on the gentle-DOWN stalk
   # gesture (msg 0xC7 GEAR_STALK), not the FURTHER_DOWN-only msg 161 bit47 the MK3 path uses.
   OP_CRUISE = 2
+  # MK4 steers by angle (14-bit STEER_REQUEST in STEER_CMD): the panda must validate the angle command
+  # with steer_angle_cmd_checks_vm instead of decoding the MK3 torque bytes.
+  ANGLE_CONTROL = 4
 
 
 @dataclass
