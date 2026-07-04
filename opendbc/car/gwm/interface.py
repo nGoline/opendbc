@@ -1,4 +1,4 @@
-from opendbc.car import structs, get_safety_config, CanBusBase, Bus, create_button_events
+from opendbc.car import structs, get_safety_config, Bus, create_button_events
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.gwm.carcontroller import CarController
 from opendbc.car.gwm.carstate import CarState
@@ -28,26 +28,22 @@ class CarInterface(CarInterfaceBase):
   CarState = CarState
   CarController = CarController
 
+  # MK3 personality sync: frames between synthetic gap-button pulses, so openpilot's personality
+  # feedback (hudControl.leadDistanceBars) can round-trip before the next pulse
+  GAC_SYNC_INTERVAL = 25
+
   def __init__(self, CP):
-      super().__init__(CP)
-      self.lat_active = False
-      self.isEPSobeying = True
-      self.steer_fault_temporary_counter = 0
-      self.recent_grab = 0    # MK4: frames remaining in the hands-on hold-off (see MK4_GRAB_* above)
-      self.last_commanded_angle = 0.0    # MK4: last apply_angle, for the tracking-error fault gate
-      self.current_personality = 0
-      self.pcm_follow_distance = 0
-      self.prev_pcm_follow_distance = -1
-      self.press_gac_button = False    # MK3 only
-      # MK4 mirrors the car's OEM follow-distance dash straight onto openpilot's personality by writing
-      # the LongitudinalPersonality param directly (selfdrived re-reads it every 0.1 s). Params lives in
-      # openpilot, which isn't a hard dependency of opendbc, so import it lazily and degrade gracefully.
-      self.params = None
-      try:
-        from openpilot.common.params import Params
-        self.params = Params()
-      except Exception:
-        self.params = None
+    super().__init__(CP)
+    self.lat_active = False
+    self.isEPSobeying = True
+    self.steer_fault_temporary_counter = 0
+    self.recent_grab = 0    # MK4: frames remaining in the hands-on hold-off (see MK4_GRAB_* above)
+    self.last_commanded_angle = 0.0    # MK4: last apply_angle, for the tracking-error fault gate
+    self.current_personality = 0
+    self.pcm_follow_distance = 0
+    self.press_gac_button = False    # MK3 only
+    self.frame = 0                   # MK3 only
+    self.last_gac_press_frame = -self.GAC_SYNC_INTERVAL    # MK3 only
 
   def apply(self, CC, now_nanos):
     self.lat_active = CC.latActive
@@ -95,16 +91,21 @@ class CarInterface(CarInterfaceBase):
     # Driving personality:
     #  - MK4: cycled by the wheel follow-distance buttons -> gapAdjustCruise buttonEvents built in carstate
     #    (the OEM CAR_DISTANCE_SELECTION dash goes stale once openpilot owns the car, so we no longer mirror it).
-    #  - MK3: mirror the OEM follow-distance dash via a gapAdjustCruise toggle.
+    #  - MK3: mirror the OEM follow-distance dash. The stock ACC cycles 4 distances, openpilot has 3
+    #    personalities (distances 3 and 4 both map to the farthest). While they disagree, pulse gap-adjust
+    #    press/release pairs (openpilot cycles on release), rate-limited so leadDistanceBars can catch up.
     if self.CP.carFingerprint != CAR.GWM_HAVAL_H6_MK4:
-      if self.pcm_follow_distance != self.prev_pcm_follow_distance:
-        if (self.pcm_follow_distance == 4 and self.current_personality != 3) or \
-           (self.pcm_follow_distance == 3 and self.current_personality != 3) or \
-           (self.pcm_follow_distance == 2 and self.current_personality != 2) or \
-           (self.pcm_follow_distance == 1 and self.current_personality != 1):
-          self.press_gac_button = not self.press_gac_button
-      self.prev_pcm_follow_distance = self.pcm_follow_distance
-      ret.buttonEvents = create_button_events(self.press_gac_button, True, {1: ButtonType.gapAdjustCruise})
+      prev_gac_button = self.press_gac_button
+      if self.press_gac_button:
+        self.press_gac_button = False    # always complete the press with a release
+      else:
+        target_personality = min(int(self.pcm_follow_distance), 3)
+        out_of_sync = self.pcm_follow_distance > 0 and target_personality != self.current_personality
+        if out_of_sync and (self.frame - self.last_gac_press_frame) >= self.GAC_SYNC_INTERVAL:
+          self.press_gac_button = True
+          self.last_gac_press_frame = self.frame
+      ret.buttonEvents = create_button_events(int(self.press_gac_button), int(prev_gac_button), {1: ButtonType.gapAdjustCruise})
+      self.frame += 1
 
     return ret
 
@@ -112,16 +113,7 @@ class CarInterface(CarInterfaceBase):
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:
     ret.brand = 'gwm'
 
-    cfgs = [get_safety_config(structs.CarParams.SafetyModel.gwm)]
-
-    # If multipanda mapping is detected (offset >= 4), keep the first safety slot
-    # as `noOutput` so an internal panda remains silent and the vehicle safety config
-    # stays as the last entry (`-1`). This enables external panda to control the vehicle.
-    CAN = CanBusBase(None, fingerprint)
-    if CAN.offset >= 4:
-      cfgs.insert(0, get_safety_config(structs.CarParams.SafetyModel.noOutput))
-
-    ret.safetyConfigs = cfgs
+    ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.gwm)]
 
     ret.dashcamOnly = False
 

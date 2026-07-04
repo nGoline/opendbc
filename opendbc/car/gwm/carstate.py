@@ -1,4 +1,4 @@
-from opendbc.car import Bus, CanBusBase, create_button_events, structs
+from opendbc.car import Bus, create_button_events, structs
 from opendbc.can.parser import CANParser
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
@@ -81,8 +81,6 @@ class CarState(CarStateBase):
     # and blocked engagement. 0 only ever appears as a 1-frame boot transient in healthy logs.
     ret.accFaulted = bool(cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 0)
     ret.cruiseState.speed = cp_cam.vl["ACC"]["ACC_SPEED_SELECTION"] * CV.KPH_TO_MS
-    if not self.CP.openpilotLongitudinalControl:
-      ret.cruiseState.speed = -1
 
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
       # ACC_CMD.STANDSTILL = camera's standstill request (1 only when actually stopped).
@@ -116,21 +114,15 @@ class CarState(CarStateBase):
                       GearShifter.park
 
     # STEERING_ANGLE is an unsigned magnitude; STEERING_DIRECTION / RATE_DIRECTION give the side.
-    # openpilot convention: steeringAngleDeg POSITIVE = LEFT turn.
-    if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
-      # Sign corrected 2026-06-22: the previous `(1 if DIRECTION else -1)` form was INVERTED — it read
-      # POSITIVE on RIGHT turns (proven via GPS heading, corr +0.82). openpilot's canonical steering angle is
-      # OPPOSITE-signed to desiredCurvature: the shared-code command (actuators.steeringAngleDeg =
-      # get_steer_from_curvature(-desiredCurvature)) correlates -0.9 with desiredCurvature and the physical wheel
-      # tracks it, yet the old readback correlated -0.9 with that command (= same sign as desiredCurvature) =>
-      # flipped. A flipped readback fed paramsd a sign-wrong angle↔yaw relationship (likely the steerRatio/
-      # angleOffset runaway) and rendered the UI steering wheel backwards. Matches the MK3 branch and Tesla
-      # (which negates its raw SAS for the same reason).
-      ret.steeringAngleDeg = cp.vl["STEER_AND_AP_STALK"]["STEERING_ANGLE"] * (-1 if cp.vl["STEER_AND_AP_STALK"]["STEERING_DIRECTION"] else 1)
-      ret.steeringRateDeg = cp.vl["STEER_AND_AP_STALK"]["STEERING_RATE"] * (-1 if cp.vl["STEER_AND_AP_STALK"]["RATE_DIRECTION"] > 0 else 1)
-    else:
-      ret.steeringAngleDeg = cp.vl["STEER_AND_AP_STALK"]["STEERING_ANGLE"] * (-1 if cp.vl["STEER_AND_AP_STALK"]["STEERING_DIRECTION"] else 1)
-      ret.steeringRateDeg = cp.vl["STEER_AND_AP_STALK"]["STEERING_RATE"] * (-1 if (cp.vl["STEER_AND_AP_STALK"]["RATE_DIRECTION"] > 0) else 1)
+    # openpilot convention: steeringAngleDeg POSITIVE = LEFT turn. Both platforms use the same encoding.
+    # MK4 sign corrected 2026-06-22: the previous `(1 if DIRECTION else -1)` form was INVERTED — it read
+    # POSITIVE on RIGHT turns (proven via GPS heading, corr +0.82). openpilot's canonical steering angle is
+    # OPPOSITE-signed to desiredCurvature (the shared-code command negates it and the wheel tracks that); a
+    # flipped readback fed paramsd a sign-wrong angle↔yaw relationship and rendered the UI wheel backwards.
+    # Tesla negates its raw SAS for the same reason.
+    stalk = cp.vl["STEER_AND_AP_STALK"]
+    ret.steeringAngleDeg = stalk["STEERING_ANGLE"] * (-1 if stalk["STEERING_DIRECTION"] else 1)
+    ret.steeringRateDeg = stalk["STEERING_RATE"] * (-1 if stalk["RATE_DIRECTION"] > 0 else 1)
 
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
       # EPS_FAULT_PERMANENT (bit125) cycles 0/1 during normal MK4 operation → spurious
@@ -236,15 +228,8 @@ class CarState(CarStateBase):
 
   @staticmethod
   def get_can_parsers(CP):
-    # Compute bus offset from number of safetyConfigs so multipanda setups
-    # (internal + external pandas) map DBCs to the correct physical bus.
-    can_base = CanBusBase(CP, None)
-    main_bus = can_base.offset
-    adas_bus = can_base.offset + 1
-    cam_bus = can_base.offset + 2
-
     return {
-      Bus.main: CANParser(DBC[CP.carFingerprint][Bus.pt], [], main_bus),
-      Bus.adas: CANParser(DBC[CP.carFingerprint][Bus.pt], [], adas_bus),
-      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], cam_bus),
+      Bus.main: CANParser(DBC[CP.carFingerprint][Bus.pt], [], 0),
+      Bus.adas: CANParser(DBC[CP.carFingerprint][Bus.pt], [], 1),
+      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], 2),
     }
