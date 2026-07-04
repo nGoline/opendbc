@@ -48,9 +48,10 @@ static uint32_t gwm_get_checksum(const CANPacket_t *msg) {
   return chksum;
 }
 
+static uint8_t gwm_crc8_lut_1d[256];  // poly 0x1D (MSB-first), generated in gwm_init
+
 static uint32_t gwm_compute_checksum(const CANPacket_t *msg) {
   uint8_t crc = 0x00;
-  const uint8_t poly = 0x1D;
   uint8_t xor_out = 0x00;
   int start = 1;
 
@@ -72,16 +73,7 @@ static uint32_t gwm_compute_checksum(const CANPacket_t *msg) {
   }
 
   for (int i = start; i < (start + 7); i++) {
-    uint8_t byte = msg->data[i];
-    crc ^= byte;
-    for (int bit = 0; bit < 8; bit++) {
-      if ((crc & 0x80U) != 0U) {
-        crc = (crc << 1) ^ poly;
-      } else {
-        crc <<= 1;
-      }
-      crc &= 0xFFU;
-    }
+    crc = gwm_crc8_lut_1d[crc ^ msg->data[i]];
   }
   uint8_t chksum = crc ^ xor_out;
   return chksum;
@@ -243,39 +235,35 @@ static safety_config gwm_init(uint16_t param) {
     {GWM_HUD, GWM_MAIN_BUS, 64, .check_relay = true}, // HUD and dashboard
   };
 
+  // Shared RX checks (hyundai-style macro so the two arrays can't diverge).
+  // BRAKE2 checksum stays ignored: its block-A xor is 0xEE on MK3 but not constant on MK4, and this safety
+  // mode is shared. Counters on GAS/BRAKE2/RX_STEER_RELATED ignored: logs show a systematic ~1/15 counter
+  // irregularity. GAS and RX_STEER_RELATED carry a block-B checksum (see gwm_compute_checksum).
+  #define GWM_COMMON_RX_CHECKS                                                                                                                             \
+    {.msg = {{GWM_ADAS_ACTIVATION, GWM_MAIN_BUS, 8, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* cruise state, angle */     \
+    {.msg = {{GWM_SPEED, GWM_MAIN_BUS, 64, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* speed */                             \
+    {.msg = {{GWM_GAS, GWM_MAIN_BUS, 64, 50U, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* gas pedal */                       \
+    {.msg = {{GWM_BRAKE, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* brake2 */ \
+    {.msg = {{GWM_RX_STEER_RELATED, GWM_MAIN_BUS, 64, 50U, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* eps feedback */       \
+    {.msg = {{GWM_STEER_CMD, GWM_CAMERA_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* stock steering cmd */ \
+    {.msg = {{GWM_CRUISE, GWM_CAMERA_BUS, 64, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* CRUISE_STATE, ACC */     \
+    {.msg = {{GWM_LONG_CONTROL, GWM_CAMERA_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* long control */    \
+    {.msg = {{GWM_BLIND_SPOT, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* blind spot */          \
+    {.msg = {{GWM_HUD, GWM_CAMERA_BUS, 64, 20U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* HUD */
+
   static RxCheck gwm_rx_checks[] = {
-    {.msg = {{GWM_ADAS_ACTIVATION, GWM_MAIN_BUS, 8, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // cruise state, steering angle, steer rate
-    {.msg = {{GWM_SPEED, GWM_MAIN_BUS, 64, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // speed
-    {.msg = {{GWM_GAS, GWM_MAIN_BUS, 64, 50U, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},   // gas pedal (block B checksum)
-    // BRAKE2 checksum stays ignored: its block-A xor is 0xEE on MK3 but not constant on MK4, and this safety
-    // mode is shared. Counters on all three ignored: logs show a systematic ~1/15 counter irregularity.
-    {.msg = {{GWM_BRAKE, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // brake2
-    {.msg = {{GWM_RX_STEER_RELATED, GWM_MAIN_BUS, 64, 50U, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // eps feedback to camera (block B checksum)
-    {.msg = {{GWM_STEER_CMD, GWM_CAMERA_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // copy stock steering cmd
-    {.msg = {{GWM_CRUISE, GWM_CAMERA_BUS, 64, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // CRUISE_STATE, ACC
-    {.msg = {{GWM_LONG_CONTROL, GWM_CAMERA_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // Longitudinal control message from camera
-    {.msg = {{GWM_BLIND_SPOT, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // Blind spot monitor
-    {.msg = {{GWM_HUD, GWM_CAMERA_BUS, 64, 20U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // HUD and dashboard
+    GWM_COMMON_RX_CHECKS
   };
 
   // MK4 op-cruise needs GWM_GEAR_STALK whitelisted so the rx hook is called for it (the arm lives there).
   // 20 Hz periodic on the main bus; checksum/counter algorithm not reverse-engineered, so ignore both.
   // Separate array so MK3 (which has no 0xC7) doesn't fault on a missing message.
   static RxCheck gwm_op_cruise_rx_checks[] = {
-    {.msg = {{GWM_ADAS_ACTIVATION, GWM_MAIN_BUS, 8, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // cruise state, steering angle, steer rate
-    {.msg = {{GWM_SPEED, GWM_MAIN_BUS, 64, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // speed
-    {.msg = {{GWM_GAS, GWM_MAIN_BUS, 64, 50U, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},   // gas pedal (block B checksum)
-    // BRAKE2 checksum stays ignored: its block-A xor is 0xEE on MK3 but not constant on MK4, and this safety
-    // mode is shared. Counters on all three ignored: logs show a systematic ~1/15 counter irregularity.
-    {.msg = {{GWM_BRAKE, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // brake2
-    {.msg = {{GWM_RX_STEER_RELATED, GWM_MAIN_BUS, 64, 50U, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // eps feedback to camera (block B checksum)
-    {.msg = {{GWM_STEER_CMD, GWM_CAMERA_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // copy stock steering cmd
-    {.msg = {{GWM_CRUISE, GWM_CAMERA_BUS, 64, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // CRUISE_STATE, ACC
-    {.msg = {{GWM_LONG_CONTROL, GWM_CAMERA_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // Longitudinal control message from camera
-    {.msg = {{GWM_BLIND_SPOT, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // Blind spot monitor
-    {.msg = {{GWM_HUD, GWM_CAMERA_BUS, 64, 20U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // HUD and dashboard
+    GWM_COMMON_RX_CHECKS
     {.msg = {{GWM_GEAR_STALK, GWM_MAIN_BUS, 8, 20U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // MK4: gentle-DOWN engage gesture
   };
+
+  gen_crc_lookup_table_8(0x1D, gwm_crc8_lut_1d);
 
   bool gwm_longitudinal = false;
   gwm_op_cruise = false;

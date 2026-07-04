@@ -330,5 +330,26 @@ class TestGwmMk4AngleSafety(common.AngleSteeringSafetyTest):
     self.assertTrue(self._tx(self._angle_cmd_msg(0, False)))
 
 
+class TestGwmMk4TxSafety(common.SafetyTest):
+  """TX whitelist / forwarding / relay-malfunction checks under the full MK4 flag set
+  (LONG_CONTROL | OP_CRUISE | ANGLE_CONTROL). The whitelist and fwd config are flag-independent
+  in gwm_init, but only this class proves the flags don't widen them; the cruise/steering
+  semantics that DO change per flag are covered by the focused classes above."""
+
+  TX_MSGS = [[0x12B, 0], [0x143, 0], [0x147, 2], [0xA1, 2]]  # Steer, long, wheel touch, cancel
+  RELAY_MALFUNCTION_ADDRS = {0: (0x12B, 0x143, 0x23D), 2: (0x147,)}
+  FWD_BLACKLISTED_ADDRS = {0: [0x147], 2: [0x12B, 0x143, 0x23D]}
+
+  def setUp(self):
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm,
+                                 GwmSafetyFlags.LONG_CONTROL | GwmSafetyFlags.OP_CRUISE | GwmSafetyFlags.ANGLE_CONTROL)
+    self.safety.init_tests()
+
+  # attr-only test from CarSafetyTest (this class skips the rest of that suite, which needs
+  # the per-platform message builders and flag-dependent cruise semantics)
+  test_relay_malfunction = common.CarSafetyTest.test_relay_malfunction
+
+
 if __name__ == "__main__":
   unittest.main()
