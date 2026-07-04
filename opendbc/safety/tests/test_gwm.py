@@ -274,7 +274,10 @@ class TestGwmMk4AngleSafety(common.AngleSteeringSafetyTest):
     return self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 0, values, fix_checksum=checksum)
 
   def test_angle_cmd_when_enabled(self):
-    # lateral accel and jerk are properly tested below (vm limits, like Tesla)
+    # lateral accel and jerk are properly tested below (vm limits, like Tesla).
+    # NOTE: steer_angle_cmd_checks_vm does NOT enforce limits.max_angle in the active path
+    # (upstream semantics, same as Tesla): the ISO lateral-accel limit is the effective cap,
+    # and at the 1 m/s fudged-speed floor it sits above 360 deg (parking needs near-full lock).
     pass
 
   def test_lateral_accel_limit(self):

@@ -81,6 +81,10 @@ class CarState(CarStateBase):
     # and blocked engagement. 0 only ever appears as a 1-frame boot transient in healthy logs.
     ret.accFaulted = bool(cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 0)
     ret.cruiseState.speed = cp_cam.vl["ACC"]["ACC_SPEED_SELECTION"] * CV.KPH_TO_MS
+    if not self.CP.openpilotLongitudinalControl:
+      # stock-long: ACC_SPEED_SELECTION hasn't been validated as the true OEM setpoint in this mode,
+      # so keep the sentinel rather than surface a possibly-bogus set speed
+      ret.cruiseState.speed = -1
 
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
       # ACC_CMD.STANDSTILL = camera's standstill request (1 only when actually stopped).

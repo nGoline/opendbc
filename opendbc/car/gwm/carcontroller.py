@@ -132,16 +132,18 @@ class CarController(CarControllerBase):
         ))
         self.apply_angle_last = apply_angle
 
-        # MK4 hands-on keepalive: re-transmit the EPS 0x147 frame to the camera with a spoofed hands-on torque
-        # (see MK4_HANDS_ON_TORQUE) so the ADAS never enters its hands-off warning/safe-stop escalation and the
-        # EPS doesn't limp mid-drive. Follow the commanded steer direction; let a real driver grab pass through.
-        # Only while engaged (relay closed): when disengaged the stock 0x147 reaches the camera directly, so a
-        # spoofed copy would double it. gate on CC.enabled.
-        if CC.enabled and CS.eps_stock_raw is not None:
-          mag = min(MK4_HANDS_ON_TORQUE_MAX, MK4_HANDS_ON_TORQUE + MK4_HANDS_ON_ANGLE_GAIN * abs(apply_angle))
-          spoof_torque = int(mag if apply_angle >= 0 else -mag)
-          if abs(CS.out.steeringTorque) > mag:  # real grab is stronger -> forward the true torque/direction
-            spoof_torque = int(CS.out.steeringTorque)
+        # MK4 hands-on keepalive: re-transmit the EPS 0x147 frame to the camera. The panda never forwards the
+        # stock 0x147 main->camera while this safety mode is active (TX config has .check_relay=true), so we are
+        # the camera's ONLY source of EPS feedback whenever onroad -- engaged OR not. Send every frame like the
+        # MK3 create_wheel_touch does; while engaged patch in a dynamic hands-on torque (floor/cap/angle-gain
+        # from highway limp analysis) so the ADAS never runs its hands-off warning/safe-stop escalation, and
+        # let a real driver grab pass through. Disengaged, the real torque is re-encoded unchanged.
+        if CS.eps_stock_raw is not None:
+          spoof_torque = int(CS.out.steeringTorque)
+          if CC.enabled:
+            mag = min(MK4_HANDS_ON_TORQUE_MAX, MK4_HANDS_ON_TORQUE + MK4_HANDS_ON_ANGLE_GAIN * abs(apply_angle))
+            if abs(spoof_torque) <= mag:
+              spoof_torque = int(mag if apply_angle >= 0 else -mag)
           can_sends.append(gwmcan.create_wheel_touch_mk4(self.CAN, CS.eps_stock_raw, spoof_torque))
       else:
         new_torque = int(round(actuators.torque * self.params.STEER_MAX))

@@ -42,8 +42,7 @@ class CarInterface(CarInterfaceBase):
     self.current_personality = 0
     self.pcm_follow_distance = 0
     self.press_gac_button = False    # MK3 only
-    self.frame = 0                   # MK3 only
-    self.last_gac_press_frame = -self.GAC_SYNC_INTERVAL    # MK3 only
+    self.last_gac_press_frame = -self.GAC_SYNC_INTERVAL    # MK3 only (self.frame comes from CarInterfaceBase)
 
   def apply(self, CC, now_nanos):
     self.lat_active = CC.latActive
@@ -53,9 +52,6 @@ class CarInterface(CarInterfaceBase):
     return super().apply(CC, now_nanos)
 
   def update(self, can_packets):
-    cp = self.can_parsers[Bus.main]
-    self.isEPSobeying = cp.vl["RX_STEER_RELATED"]["A_RX_STEER_REQUESTED"] == 1
-
     # MK4: stash the raw EPS RX_STEER_RELATED (0x147) frame off the main bus so the carcontroller can re-transmit
     # it to the camera (hands-on keepalive). The DBC doesn't model the whole 64-byte frame, so we forward raw
     # bytes and patch only the driver-torque field there (see gwmcan.create_wheel_touch_mk4). can_packets is a
@@ -66,18 +62,19 @@ class CarInterface(CarInterfaceBase):
           if address == 0x147 and src == 0:
             self.CS.eps_stock_raw = bytes(dat)
 
-    cp_cam = self.can_parsers[Bus.cam]
-    self.pcm_follow_distance = cp_cam.vl["ACC"]["CAR_DISTANCE_SELECTION"]
-
     ret = super().update(can_packets)
+
+    # read AFTER super().update() has parsed this cycle's packets, so these are same-epoch with ret
+    self.isEPSobeying = self.can_parsers[Bus.main].vl["RX_STEER_RELATED"]["A_RX_STEER_REQUESTED"] == 1
+    self.pcm_follow_distance = self.can_parsers[Bus.cam].vl["ACC"]["CAR_DISTANCE_SELECTION"]
 
     # steerTempUnavailable: count a fault only when the EPS stops obeying AND it isn't the driver's doing.
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
       # (a) wheel wasn't grabbed recently (hands-off override hold-off — see MK4_GRAB_* note above), and
       # (b) the wheel is actually diverging from the command (a genuine limp/override drifts off; a spurious
       #     highway A_RX==2 stays glued to it — see MK4_ANGLE_TRACK_ERR note above). Both gates required.
-      driver_torque = cp.vl["RX_STEER_RELATED"]["B_RX_DRIVER_TORQUE"]
-      self.recent_grab = MK4_GRAB_HOLD_FRAMES if abs(driver_torque) > MK4_GRAB_TORQUE else max(0, self.recent_grab - 1)
+      # ret.steeringTorque is B_RX_DRIVER_TORQUE (set in carstate), same epoch as the rest of ret
+      self.recent_grab = MK4_GRAB_HOLD_FRAMES if abs(ret.steeringTorque) > MK4_GRAB_TORQUE else max(0, self.recent_grab - 1)
       hands_on = self.recent_grab > 0
       not_tracking = abs(ret.steeringAngleDeg - self.last_commanded_angle) > MK4_ANGLE_TRACK_ERR
       self.steer_fault_temporary_counter = (self.steer_fault_temporary_counter + 1) \
