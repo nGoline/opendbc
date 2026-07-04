@@ -14,20 +14,26 @@ LongCtrlState = structs.CarControl.Actuators.LongControlState
 MAX_USER_TORQUE = 100  # 1.0 Nm
 
 # MK4 hands-on keepalive: driver torque we spoof to the camera/ADAS (via 0x147 on the camera bus) so it never
-# runs its hands-off "hold the wheel" warning + safe-stop escalation (decoded as msg 683 byte5, drives 108/109),
-# letting the driver keep hands off on the highway like other openpilot cars. comma's DM camera is the attention
-# monitor. Floor magnitude sits clearly above the stock hands-off band (stock warns while |torque| < ~18) and
-# below our override gate (120); the real torque passes through when the driver actually grabs. Tunable on-road:
-# raise if the warning still fires, lower if the ADAS flags implausible torque.
-MK4_HANDS_ON_TORQUE = 65
+# runs its hands-off "hold the wheel" warning + safe-stop escalation and the EPS keeps steering hands-off.
+# comma's DM camera is the attention monitor. The MK3 torque path does this dynamically (ea_simulated_torque =
+# apply_torque*2). The first MK4 try used a FIXED 65 and the EPS still limped at highway speed (routes 110-112,
+# verified transmitting @50Hz) -- because the OEM only recognizes "hands on" around |torque| > ~102, so 65 STILL
+# read as hands-off. Fix: sit the FLOOR clearly above ~102 and scale up with the commanded angle like MK3 (more
+# steering effort -> more apparent driver torque), capped below a real hard grab so a genuine override still
+# passes through. Follows the commanded steer direction. Tunable on-road: raise the floor if it still limps,
+# lower the cap if the ADAS flags implausible torque.
+MK4_HANDS_ON_TORQUE = 120      # floor (was 65): above the OEM hands-on recognition point (~102)
+MK4_HANDS_ON_TORQUE_MAX = 170  # cap: strong hands-on, still below the driver's real hard grabs (125-214)
+MK4_HANDS_ON_ANGLE_GAIN = 8    # extra spoofed torque per deg of |apply_angle| (mimics MK3's dynamic scaling)
 
-# MK4 override thresholds, grounded in the stock LKAS: while steering the OEM tolerates driver torque
-# up to ~67 routinely (p90) and only hands off around ~102 (median), ignoring brief spikes to ~156 (p99).
-# Our old fixed >50 instant release was HALF that, so resting-hand contact flapped lateral on/off and
-# reset the angle slew every few frames, so openpilot never built up a turn.
-# Debounce a ~90 threshold with a latch + instant release on a firm grab.
-OVERRIDE_TORQUE = 120          # sustained |driver torque| to hand off.
-OVERRIDE_INSTANT_TORQUE = 250  # firm deliberate grab (> p99 ~224) -> release within one frame for a clean takeover
+# MK4 override thresholds. This driver NEVER rests a hand on the wheel (fully hands-off), so the old
+# resting-hand-flap concern that pushed these up doesn't apply here — and it was HURTING take-control: on the
+# highway limps (route 110) the driver's grabs to take over read 44-85 and even the real hard grabs 125-214
+# didn't reliably register because the gate sat at 120. Match MK3's threshold (MAX_USER_TORQUE=100) so a genuine
+# grab hands off cleanly, with a firm-grab instant release just above the OEM hands-on point (~102).
+# Debounce still tolerates brief spikes.
+OVERRIDE_TORQUE = 100          # sustained |driver torque| to hand off (was 120; = MK3 MAX_USER_TORQUE).
+OVERRIDE_INSTANT_TORQUE = 150  # firm deliberate grab -> release within one frame for a clean takeover (was 250)
 OVERRIDE_FRAMES = 7            # ~70 ms sustained @100 Hz before engaging override; tolerates brief spikes
 OVERRIDE_HOLD_FRAMES = 100     # once overridden, stay handed-off ~1.0 s before re-asserting, like the OEM LKAS.
                                # The old latch re-asserted the instant torque dipped, so openpilot grabbed back
@@ -131,8 +137,9 @@ class CarController(CarControllerBase):
         # Only while engaged (relay closed): when disengaged the stock 0x147 reaches the camera directly, so a
         # spoofed copy would double it. gate on CC.enabled.
         if CC.enabled and CS.eps_stock_raw is not None:
-          spoof_torque = MK4_HANDS_ON_TORQUE if apply_angle >= 0 else -MK4_HANDS_ON_TORQUE
-          if abs(CS.out.steeringTorque) > MK4_HANDS_ON_TORQUE:
+          mag = min(MK4_HANDS_ON_TORQUE_MAX, MK4_HANDS_ON_TORQUE + MK4_HANDS_ON_ANGLE_GAIN * abs(apply_angle))
+          spoof_torque = int(mag if apply_angle >= 0 else -mag)
+          if abs(CS.out.steeringTorque) > mag:  # real grab is stronger -> forward the true torque/direction
             spoof_torque = int(CS.out.steeringTorque)
           can_sends.append(gwmcan.create_wheel_touch_mk4(self.CAN, CS.eps_stock_raw, spoof_torque))
       else:
