@@ -93,7 +93,7 @@ def create_steer_command(packer, CAN: CanBus, camera_stock_values, steer: float,
   return packer.make_can_msg("STEER_CMD", CAN.main, values)
 
 
-def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, active, standstill, is_mk4: bool, regen: bool = False):
+def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, active, standstill, is_mk4: bool, regen: bool = False, braking: bool | None = None):
   values = {s: longitudinal_stock_values[s] for s in [
     "BRAKE_GAS_STATE_2",
     "SPEED_REAL",
@@ -104,12 +104,24 @@ def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, a
     "COUNTER_ACC",
   ]}
 
+  # `braking` is the gas<->brake decision. MK4 computes it in carcontroller with a lift-off threshold + hysteresis
+  # (regen-lead); MK3 and any legacy caller falls back to the raw sign of accel (unchanged behavior).
+  if braking is None:
+    braking = accel < 0
+
   brake_or_gas = longitudinal_stock_values["BRAKE_OR_GAS_REQ"]
   brake_cmd = 0
   accel_cmd = 0
-  if accel < 0 and active:
+  if braking and active:
     brake_or_gas = 13
     brake_cmd = (accel * (107 - 41)) - 41
+    if is_mk4:
+      # Never command LESS braking than the -41 off-baseline (can happen when the hysteresis holds brake mode
+      # while the planner accel sits just above 0 -- there we brake via regen only, friction off).
+      brake_cmd = min(brake_cmd, -41)
+      # Pin the motor request to its floor so there is NO drive torque while braking (regen only, never
+      # gas+brake at once). OEM sends GAS_CMD phys -192 (raw 0) throughout regen braking.
+      accel_cmd = -192
   elif active:
     brake_or_gas = 12
     # `accel` here is already speed-normalized in carcontroller (actuators.accel / ACCEL_MAX=2). The [0.25,1]
@@ -151,7 +163,7 @@ def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, a
     # MK4: standstill encoding rides in the passthrough BYPASS_ACC1 field (left untouched); only
     # STANDSTILL stays explicit. Same encoding as MK3's STANDSTILL_1 for the single signal.
     standstill1 = longitudinal_stock_values["STANDSTILL"]
-    if accel < 0 and active:
+    if braking and active:
       standstill1 = 1 if standstill else 0
     elif active:
       standstill1 = 0
@@ -160,7 +172,7 @@ def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, a
     standstill1 = longitudinal_stock_values["STANDSTILL_1"]
     standstill2 = longitudinal_stock_values["STANDSTILL_2"]
     standstill3 = longitudinal_stock_values["STANDSTILL_3"]
-    if accel < 0 and active:
+    if braking and active:
       standstill1 = 1 if standstill else 0
       standstill2 = 3 if standstill else 4  # 3 "active" 4 "inactive"
       standstill3 = 0 if standstill else 1  # 0 "active" 1 "inactive"

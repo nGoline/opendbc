@@ -40,19 +40,23 @@ OVERRIDE_HOLD_FRAMES = 100     # once overridden, stay handed-off ~1.0 s before 
                                # "several times a second". The OEM waits ~1 s before trying again; this hold matches that and stops the flapping.
 
 
-# MK4 regen brake-state hysteresis, per driver regen LEVEL (msg 726 REGEN_LEVEL, read in carstate).
-# The powertrain enables regen off the brake-vs-gas state bit; tying it to every accel<0 made it flicker around
-# the planner's near-zero cruise accel -> regen pulsed on/off -> jerky longitudinal (drive e6: state flipped
-# 207x, 99% at |accel|<0.3). So only flip into regen for REAL braking, with hysteresis vs cruise noise (e6
-# cruise accel ~ +0.13 +/-0.16). The ENTER threshold tracks the OEM's per-level entry-point measured on drive
-# ec: Low~-0.5, Normal~-0.3, Heavy~0. Heavy uses a flicker-safe -0.15 (NOT full one-pedal; the car's separate
-# one-pedal config is off) since true ~0 entry would re-flicker on OP's oscillating cruise accel. (level -> (enter, release) m/s^2)
-REGEN_THRESHOLDS = {
-  16: (-0.5, -0.2),    # Low (e.g. highway): regen only on real braking
-  8:  (-0.3, -0.1),    # Normal
-  24: (-0.15, 0.05),   # Heavy: strongest of the 3, flicker-safe approximation of one-pedal
-}
-REGEN_THRESHOLDS_DEFAULT = (-0.5, -0.2)  # unknown level -> Low (most conservative)
+# MK4 regen-lead: EVERY braking demand recovers energy (regen state bit ON) at ALL levels -- openpilot never
+# friction-brakes with the powertrain still in the gas/drive state (the old bug: verified on the 8h30 drive,
+# 49% of friction frames had regen OFF, readback msg283.b22 ~9 = 0%, while manual driving held b22 ~230 on the
+# same descents). The driver's Low/Normal/Heavy selector (msg 726) does NOT gate whether braking regenerates --
+# it only sets WHEN regen begins around lift-off, mirroring how the car drives under the pedal:
+#   LIGHT  (16): regen only when openpilot actually brakes (accel < 0)
+#   NORMAL ( 8): + a little regen as openpilot eases off, just below 0 (light lift-off)
+#   HEAVY  (24): regen as soon as openpilot is off the "gas" (one-pedal; regen from a positive threshold)
+# This threshold is the gas<->brake/regen boundary. A small release hysteresis stops the command oscillating
+# (head-bobbing) when the planner accel dithers across it while holding speed. Regen MAGNITUDE stays the
+# powertrain's call from the physical selector. m/s^2.
+MK4_REGEN_LIFTOFF = {16: 0.0, 8: 0.05, 24: 0.15}
+MK4_REGEN_LIFTOFF_DEFAULT = 0.0    # unknown level -> LIGHT (brake-only regen)
+MK4_REGEN_HYST = 0.10              # release margin above the entry threshold -> kills gas<->brake dither
+# Below this speed the lift-off threshold is forced to 0 (gas as soon as accel>0) so launch from a stop stays
+# crisp -- NOT a throttle dead zone (GAS_CMD still maps the full [0,1] range; this only affects the mode switch).
+MK4_LIFTOFF_MIN_SPEED = 2.0        # m/s
 
 
 class CarController(CarControllerBase):
@@ -69,7 +73,7 @@ class CarController(CarControllerBase):
     self.override_active = False   # MK4: debounced driver-override latch
     self.override_counter = 0
     self.override_hold = 0         # MK4: frames remaining in the post-override OEM-style hold-off
-    self.regen_brake = False       # MK4: debounced "real braking" latch for the regen brake-state bit
+    self.regen_brake = False       # MK4: hysteretic braking/regen latch (regen-lead: braking == regen state)
 
   def update(self, CC, CS, now_nanos):
     can_sends = []
@@ -177,14 +181,23 @@ class CarController(CarControllerBase):
           accel = - abs(self.accel / CarControllerParams.ACCEL_MIN)
         else:
           accel = self.accel / CarControllerParams.ACCEL_MAX
-        # MK4 regen brake-state hysteresis, level-aware (see REGEN_THRESHOLDS above): the ENTER threshold tracks
-        # the driver's regen level (CS.regen_level from msg 726). Only request regen for real braking, not the
-        # planner's near-zero coast during cruise (that flicker made longitudinal jerky on e6).
-        regen_enter, regen_release = REGEN_THRESHOLDS.get(CS.regen_level, REGEN_THRESHOLDS_DEFAULT)
-        if CC.longActive and self.accel < regen_enter:
-          self.regen_brake = True
-        elif (not CC.longActive) or self.accel > regen_release:
-          self.regen_brake = False
+        # MK4 regen-lead + gas/brake hysteresis (see MK4_REGEN_LIFTOFF above). `braking` is the single gas<->brake
+        # decision: below the level-dependent lift-off threshold we brake WITH regen; above it we drive. A release
+        # margin (MK4_REGEN_HYST) holds the mode through planner dither so the command doesn't oscillate. The
+        # threshold is forced to 0 at low speed so launch stays crisp. Regen state bit == braking (regen-lead).
+        if self.is_mk4:
+          lift = MK4_REGEN_LIFTOFF.get(CS.regen_level, MK4_REGEN_LIFTOFF_DEFAULT)
+          if CS.out.vEgo < MK4_LIFTOFF_MIN_SPEED:
+            lift = 0.0
+          if not CC.longActive:
+            self.regen_brake = False
+          elif self.regen_brake:
+            self.regen_brake = self.accel < lift + MK4_REGEN_HYST   # release (hysteresis kills gas<->brake dither)
+          else:
+            self.regen_brake = self.accel < lift                    # enter braking/regen
+          braking = self.regen_brake
+        else:
+          braking = self.accel < 0
         can_sends.append(gwmcan.create_longitudinal_command(
           self.packer,
           self.CAN,
@@ -194,6 +207,7 @@ class CarController(CarControllerBase):
           standstill=standstill,
           is_mk4=self.is_mk4,
           regen=self.regen_brake,
+          braking=braking,
         ))
 
     if self.frame % 5 == 0: # 20 Hz
