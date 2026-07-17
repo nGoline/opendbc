@@ -115,13 +115,6 @@ def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, a
   if braking and active:
     brake_or_gas = 13
     brake_cmd = (accel * (107 - 41)) - 41
-    if is_mk4:
-      # Never command LESS braking than the -41 off-baseline (can happen when the hysteresis holds brake mode
-      # while the planner accel sits just above 0 -- there we brake via regen only, friction off).
-      brake_cmd = min(brake_cmd, -41)
-      # Pin the motor request to its floor so there is NO drive torque while braking (regen only, never
-      # gas+brake at once). OEM sends GAS_CMD phys -192 (raw 0) throughout regen braking.
-      accel_cmd = -192
   elif active:
     brake_or_gas = 12
     # `accel` here is already speed-normalized in carcontroller (actuators.accel / ACCEL_MAX=2). The [0.25,1]

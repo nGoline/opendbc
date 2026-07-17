@@ -40,23 +40,19 @@ OVERRIDE_HOLD_FRAMES = 100     # once overridden, stay handed-off ~1.0 s before 
                                # "several times a second". The OEM waits ~1 s before trying again; this hold matches that and stops the flapping.
 
 
-# MK4 regen-lead: EVERY braking demand recovers energy (regen state bit ON) at ALL levels -- openpilot never
-# friction-brakes with the powertrain still in the gas/drive state (the old bug: verified on the 8h30 drive,
-# 49% of friction frames had regen OFF, readback msg283.b22 ~9 = 0%, while manual driving held b22 ~230 on the
-# same descents). The driver's Low/Normal/Heavy selector (msg 726) does NOT gate whether braking regenerates --
-# it only sets WHEN regen begins around lift-off, mirroring how the car drives under the pedal:
-#   LIGHT  (16): regen only when openpilot actually brakes (accel < 0)
-#   NORMAL ( 8): + a little regen as openpilot eases off, just below 0 (light lift-off)
-#   HEAVY  (24): regen as soon as openpilot is off the "gas" (one-pedal; regen from a positive threshold)
-# This threshold is the gas<->brake/regen boundary. A small release hysteresis stops the command oscillating
-# (head-bobbing) when the planner accel dithers across it while holding speed. Regen MAGNITUDE stays the
-# powertrain's call from the physical selector. m/s^2.
-MK4_REGEN_LIFTOFF = {16: 0.0, 8: 0.05, 24: 0.15}
-MK4_REGEN_LIFTOFF_DEFAULT = 0.0    # unknown level -> LIGHT (brake-only regen)
-MK4_REGEN_HYST = 0.10              # release margin above the entry threshold -> kills gas<->brake dither
-# Below this speed the lift-off threshold is forced to 0 (gas as soon as accel>0) so launch from a stop stays
-# crisp -- NOT a throttle dead zone (GAS_CMD still maps the full [0,1] range; this only affects the mode switch).
-MK4_LIFTOFF_MIN_SPEED = 2.0        # m/s
+# MK4 regen-lead: every real braking demand recovers energy (regen state bit ON), not just deep braking. The old
+# code only enabled regen below accel<-0.5 (Low)/-0.3 (Normal), so mild / hold-speed braking (incl. gentle
+# downhills) was pure friction with the powertrain still in the gas/drive state -- wasting energy and burning pads
+# (verified on the 8h30 drive: 49% of friction frames had regen OFF, readback msg283.b22 ~9 = 0%, while manual
+# driving held b22 ~230 on the same descents). The regen state bit now follows the brake request directly: any
+# accel<0 regenerates. Regen MAGNITUDE stays the powertrain's call (driver Low/Normal/Heavy selector, msg 726).
+#
+# CAUTION (drives 13e-146, 2026-07-16): an earlier version also pinned GAS_CMD=-192 (raw 0) and held brake mode
+# through a lift-off deadband/hysteresis. That FAULTED the OEM ACC ECU ("Cruise Fault: Restart the Car" / TAKE
+# CONTROL red screen -- accFaulted = ACC.CRUISE_STATE_2==0): under pcmCruise=False the dormant OEM ACC never sees
+# GAS_CMD raw 0, nor a sustained brake request (req=13) held at the -41 brake-off baseline, so it rejected the
+# frame. Those are reverted. Keep the frame otherwise byte-identical to the known-good 8h30 build. Lift-off-level
+# regen (one-pedal feel) + gas/brake anti-dither are deferred until this base regen is confirmed fault-free.
 
 
 class CarController(CarControllerBase):
@@ -181,23 +177,11 @@ class CarController(CarControllerBase):
           accel = - abs(self.accel / CarControllerParams.ACCEL_MIN)
         else:
           accel = self.accel / CarControllerParams.ACCEL_MAX
-        # MK4 regen-lead + gas/brake hysteresis (see MK4_REGEN_LIFTOFF above). `braking` is the single gas<->brake
-        # decision: below the level-dependent lift-off threshold we brake WITH regen; above it we drive. A release
-        # margin (MK4_REGEN_HYST) holds the mode through planner dither so the command doesn't oscillate. The
-        # threshold is forced to 0 at low speed so launch stays crisp. Regen state bit == braking (regen-lead).
+        # MK4 regen-lead (see note above): every real brake regenerates (regen state == braking). Frame otherwise
+        # byte-identical to the known-good build -- braking is the plain sign of accel, no held-coast, no GAS floor.
+        braking = self.accel < 0
         if self.is_mk4:
-          lift = MK4_REGEN_LIFTOFF.get(CS.regen_level, MK4_REGEN_LIFTOFF_DEFAULT)
-          if CS.out.vEgo < MK4_LIFTOFF_MIN_SPEED:
-            lift = 0.0
-          if not CC.longActive:
-            self.regen_brake = False
-          elif self.regen_brake:
-            self.regen_brake = self.accel < lift + MK4_REGEN_HYST   # release (hysteresis kills gas<->brake dither)
-          else:
-            self.regen_brake = self.accel < lift                    # enter braking/regen
-          braking = self.regen_brake
-        else:
-          braking = self.accel < 0
+          self.regen_brake = CC.longActive and braking
         can_sends.append(gwmcan.create_longitudinal_command(
           self.packer,
           self.CAN,
