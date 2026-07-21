@@ -68,6 +68,9 @@ class CarInterface(CarInterfaceBase):
         for address, dat, src in msgs:
           if address == 0x147 and src == 0:
             self.CS.eps_stock_raw = bytes(dat)
+          # Camera ACC (0x2AB) on cam bus — re-TX to main with openpilot set speed (cluster display)
+          if address == 0x2AB and src == 2:
+            self.CS.acc_stock_raw = bytes(dat)
 
     ret = super().update(can_packets)
 
@@ -133,8 +136,9 @@ class CarInterface(CarInterfaceBase):
       # Route 00000003 showed steering oscillation (cmd hunting ±2–7°); raise toward the
       # common angle-car band so the planner does not over-correct a lagging EPS.
       ret.steerActuatorDelay = 0.15
-      # MK4 owns its own cruise loop: the OEM ACC freezes its set speed once openpilot drives, so don't
-      # follow it. openpilot manages engagement + set-speed from the wheel buttons (carstate buttonEvents).
+      # MK4 owns its own cruise loop: openpilot manages engagement + set-speed from the wheel buttons
+      # (carstate buttonEvents). The camera's ACC_SPEED_SELECTION freezes, so carcontroller re-TXes 0x2AB
+      # onto main with VCruiseHelper's set speed for the OEM cluster (create_acc_cluster_mk4).
       ret.pcmCruise = False
       # Tell the panda to arm controls off the gentle-DOWN stalk gesture (0xC7 GEAR_STALK) instead of the
       # FURTHER_DOWN-only msg 161 bit47 — matches the engage source in carstate so the two gates stay in sync.

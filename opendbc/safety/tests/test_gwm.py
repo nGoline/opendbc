@@ -69,9 +69,9 @@ def checksum(msg):
 
 
 class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, common.LongitudinalGasBrakeSafetyTest):
-  TX_MSGS = [[0x12B, 0], [0x143, 0], [0x147, 2], [0xA1, 2]] # Steer, long, wheel touch, cancel
-  RELAY_MALFUNCTION_ADDRS = {0: (0x12B, 0x143, 0x23D), 2: (0x147,)}
-  FWD_BLACKLISTED_ADDRS = {0: [0x147], 2: [0x12B, 0x143, 0x23D]}
+  TX_MSGS = [[0x12B, 0], [0x143, 0], [0x147, 2], [0xA1, 2], [0x23D, 0], [0x2AB, 0]]  # steer, long, wheel touch, cancel, HUD, ACC cluster
+  RELAY_MALFUNCTION_ADDRS = {0: (0x12B, 0x143, 0x23D, 0x2AB), 2: (0x147,)}
+  FWD_BLACKLISTED_ADDRS = {0: [0x147], 2: [0x12B, 0x143, 0x23D, 0x2AB]}
 
   MAX_RATE_UP = 4
   MAX_RATE_DOWN = 6
@@ -336,9 +336,9 @@ class TestGwmMk4TxSafety(common.SafetyTest):
   in gwm_init, but only this class proves the flags don't widen them; the cruise/steering
   semantics that DO change per flag are covered by the focused classes above."""
 
-  TX_MSGS = [[0x12B, 0], [0x143, 0], [0x147, 2], [0xA1, 2]]  # Steer, long, wheel touch, cancel
-  RELAY_MALFUNCTION_ADDRS = {0: (0x12B, 0x143, 0x23D), 2: (0x147,)}
-  FWD_BLACKLISTED_ADDRS = {0: [0x147], 2: [0x12B, 0x143, 0x23D]}
+  TX_MSGS = [[0x12B, 0], [0x143, 0], [0x147, 2], [0xA1, 2], [0x23D, 0], [0x2AB, 0]]  # steer, long, wheel touch, cancel, HUD, ACC cluster
+  RELAY_MALFUNCTION_ADDRS = {0: (0x12B, 0x143, 0x23D, 0x2AB), 2: (0x147,)}
+  FWD_BLACKLISTED_ADDRS = {0: [0x147], 2: [0x12B, 0x143, 0x23D, 0x2AB]}
 
   def setUp(self):
     self.safety = libsafety_py.libsafety

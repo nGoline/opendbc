@@ -1,6 +1,7 @@
 import numpy as np
 from opendbc.can.packer import CANPacker
 from opendbc.car import Bus, structs
+from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.lateral import apply_meas_steer_torque_limits, apply_steer_angle_limits_vm
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.vehicle_model import VehicleModel
@@ -211,6 +212,25 @@ class CarController(CarControllerBase):
         steer_required=CC.latActive,
         is_mk4=self.is_mk4,
       ))
+
+      # MK4 OP_CRUISE: re-TX camera ACC (0x2AB) onto main with openpilot set speed so the Haval
+      # cluster tracks VCruiseHelper. Stock ACC freezes ACC_SPEED_SELECTION once we own long.
+      # Always re-TX while we hold the panda relay slot (check_relay on 0x2AB); only patch speed
+      # when engaged with a real set speed (not V_CRUISE_UNSET=255).
+      if self.is_mk4 and self.CP.openpilotLongitudinalControl and CS.acc_stock_raw is not None:
+        hud = CC.hudControl
+        set_kph = None
+        if CC.enabled and hud.speedVisible:
+          set_kph = float(hud.setSpeed) * CV.MS_TO_KPH
+          if not (0.0 < set_kph < 200.0):
+            set_kph = None
+        # Map openpilot personality bars (1..3) onto OEM follow dashes (1..4): 3 -> 4 (farthest).
+        follow = None
+        if CC.enabled and hud.leadDistanceBars > 0:
+          follow = 4 if hud.leadDistanceBars >= 3 else int(hud.leadDistanceBars)
+        can_sends.append(gwmcan.create_acc_cluster_mk4(
+          self.CAN, CS.acc_stock_raw, set_speed_kph=set_kph, follow_dashes=follow,
+        ))
 
     new_actuators = actuators.as_builder()
     if self.CP.steerControlType == SteerControlType.angle:

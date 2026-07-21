@@ -286,6 +286,30 @@ def create_hud_command(packer, CAN: CanBus, hud_stock_values, steer_required, is
   return packer.make_can_msg("LATERAL_STATE", CAN.main, values)
 
 
+def create_acc_cluster_mk4(CAN: CanBus, acc_stock_raw: bytes, set_speed_kph: float | None = None,
+                          follow_dashes: int | None = None):
+  """Re-TX camera ACC (0x2AB) onto the main bus with openpilot's set speed for the OEM cluster.
+
+  Under OP_CRUISE the stock camera freezes ACC_SPEED_SELECTION, so the Haval dash never tracks
+  openpilot's VCruiseHelper. We block the camera's 0x2AB from being forwarded (panda check_relay)
+  and re-transmit the latest camera frame with:
+    byte22 = ACC_SPEED_SELECTION (kph, factor 1)
+    optional byte21 low 3 bits = CAR_DISTANCE_SELECTION (1..4 follow dashes)
+    byte16 = CRC1 = crc8(bytes[17:24], xor=0x40)  — verified 600/600 frames, route 00000008
+
+  When set_speed_kph is None the frame is forwarded byte-identical (still required while we own
+  the relay slot). Follow-dashes None leaves the stock distance field untouched.
+  """
+  b = bytearray(acc_stock_raw)
+  if set_speed_kph is not None:
+    b[22] = int(round(float(np.clip(set_speed_kph, 0.0, 255.0)))) & 0xFF
+  if follow_dashes is not None:
+    dashes = int(np.clip(follow_dashes, 0, 7))
+    b[21] = (b[21] & ~0x07) | (dashes & 0x07)
+  b[16] = checksum(bytes(b[17:24]), 0x40)
+  return 0x2AB, bytes(b), CAN.main
+
+
 def checksum(data, xor_output):
   crc = 0
   for byte in data:

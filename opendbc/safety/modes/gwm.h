@@ -227,12 +227,15 @@ static safety_config gwm_init(uint16_t param) {
     {GWM_HUD, GWM_MAIN_BUS, 64, .check_relay = true}, // HUD and dashboard
   };
 
+  // GWM_CRUISE (0x2AB ACC): MK4 OP_CRUISE re-TXes the camera frame onto main with openpilot set
+  // speed so the OEM cluster tracks VCruiseHelper (stock freezes ACC_SPEED_SELECTION under OP long).
   static const CanMsg GWM_LONG_TX_MSGS[] = {
     {GWM_ADAS_ACTIVATION, GWM_CAMERA_BUS, 8, .check_relay = false}, // Cancel command
     {GWM_RX_STEER_RELATED, GWM_CAMERA_BUS, 64, .check_relay = true}, // EPS steering feedback to camera
     {GWM_STEER_CMD, GWM_MAIN_BUS, 64, .check_relay = true}, // Steering command
     {GWM_LONG_CONTROL, GWM_MAIN_BUS, 64, .check_relay = true}, // Longitudinal control message from camera
     {GWM_HUD, GWM_MAIN_BUS, 64, .check_relay = true}, // HUD and dashboard
+    {GWM_CRUISE, GWM_MAIN_BUS, 64, .check_relay = true}, // ACC cluster set-speed / follow dashes
   };
 
   // Shared RX checks (hyundai-style macro so the two arrays can't diverge).
