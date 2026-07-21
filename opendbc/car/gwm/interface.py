@@ -135,7 +135,8 @@ class CarInterface(CarInterfaceBase):
       # 0.08 was at the extreme low end of opendbc (most cars 0.10–0.20; MK3 GWM is 0.30).
       # Route 00000003 showed steering oscillation (cmd hunting ±2–7°); raise toward the
       # common angle-car band so the planner does not over-correct a lagging EPS.
-      ret.steerActuatorDelay = 0.15
+      # Was 0.15; +50 ms damps low-speed path noise (stop-and-go "vai e volta") without highway lag.
+      ret.steerActuatorDelay = 0.20
       # MK4 owns its own cruise loop: openpilot manages engagement + set-speed from the wheel buttons
       # (carstate buttonEvents). The camera's ACC_SPEED_SELECTION freezes, so carcontroller re-TXes 0x2AB
       # onto main with VCruiseHelper's set speed for the OEM cluster (create_acc_cluster_mk4).
