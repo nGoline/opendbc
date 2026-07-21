@@ -129,7 +129,10 @@ class CarInterface(CarInterfaceBase):
       # Angle-based steering: do NOT call configure_torque_tune — controlsd would
       # call update_live_torque_params on LatControlAngle which doesn't implement it.
       ret.steerControlType = SteerControlType.angle
-      ret.steerActuatorDelay = 0.08
+      # 0.08 was at the extreme low end of opendbc (most cars 0.10–0.20; MK3 GWM is 0.30).
+      # Route 00000003 showed steering oscillation (cmd hunting ±2–7°); raise toward the
+      # common angle-car band so the planner does not over-correct a lagging EPS.
+      ret.steerActuatorDelay = 0.15
       # MK4 owns its own cruise loop: the OEM ACC freezes its set speed once openpilot drives, so don't
       # follow it. openpilot manages engagement + set-speed from the wheel buttons (carstate buttonEvents).
       ret.pcmCruise = False
