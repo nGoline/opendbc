@@ -32,6 +32,10 @@ class CarControllerParams:
   # <0.2% of normal-driving frames (offline-validated on drives ce-5/6/8/10). NOT an override cure —
   # the limp's trigger isn't the error magnitude — just a windup limiter that complements the A_RX fault.
   MK4_ANGLE_ERROR_MAX = 4.0  # deg
+  # When A_RX_STEER_REQUESTED != 1 (EPS override/limp/not-granting), hold a tight band around the wheel so
+  # we don't keep commanding large opposite angles into a non-executing EPS (route 00000002 seg14/26:
+  # softDisable with desired vs wheel opposite-signed while torque was low).
+  MK4_ANGLE_ERROR_MAX_NOT_OBEYING = 1.0  # deg
 
   def __init__(self, CP: CarParams):
     self.STEER_DELTA_UP = 4

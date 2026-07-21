@@ -18,10 +18,11 @@ MK4_GRAB_TORQUE = 80          # |driver torque| marking a deliberate hands-on ov
 MK4_GRAB_HOLD_FRAMES = 150    # ~1.5 s: keep treating the wheel as hands-on after the last grab
 # A_RX==2 is NOT sufficient for a fault: at highway speed the EPS flips it to 2 for ~1 s while still executing
 # the command hands-off (route 103 seg10/11/12: A_RX=2 ~1 s, |actual-command| <= 0.6 deg, torque < 17 -> a
-# spurious "TAKE CONTROL"). A genuine limp/override has the wheel DIVERGING from the command (seg20: 8.4 deg),
-# so also require a real tracking error before counting a fault. Threshold clears the ~0.6 deg false-fire band
-# (and the ~2.4 deg worst-case actuator-delay lag) with margin, well below a real divergence.
-MK4_ANGLE_TRACK_ERR = 3.0     # deg; |steeringAngleDeg - commanded apply_angle| above this = wheel genuinely off-command
+# spurious "TAKE CONTROL"). A genuine limp/override has the wheel DIVERGING from the *applied* command
+# (carcontroller clip + CAN), not the latcontrol desired. Compare against apply_angle_last only.
+# Threshold clears the ~0.6 deg false-fire band (and ~2.4 deg actuator-delay lag) with margin; the clip
+# keeps |applied-meas| <= MK4_ANGLE_ERROR_MAX (4°), so this fires near the clip rail when EPS is not obeying.
+MK4_ANGLE_TRACK_ERR = 3.0     # deg; |steeringAngleDeg - applied apply_angle| above this = wheel off command
 
 
 class CarInterface(CarInterfaceBase):
@@ -46,10 +47,16 @@ class CarInterface(CarInterfaceBase):
 
   def apply(self, CC, now_nanos):
     self.lat_active = CC.latActive
-    self.last_commanded_angle = CC.actuators.steeringAngleDeg
     hud_control = CC.hudControl
     self.current_personality = hud_control.leadDistanceBars
-    return super().apply(CC, now_nanos)
+    # Use the POST-carcontroller angle (carOutput / apply_angle_last), not CC.actuators which is the
+    # latcontrol *desired* before VM limits + MK4_ANGLE_ERROR_MAX clip. Comparing the wheel to the
+    # desired caused false TAKE CONTROL when A_RX!=1 but the EPS still tracked the clipped command
+    # (route 00000002--1599416482 seg14: desired vs wheel ~9.6°, clipped cmd stayed near wheel).
+    new_actuators, can_sends = super().apply(CC, now_nanos)
+    if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
+      self.last_commanded_angle = float(new_actuators.steeringAngleDeg)
+    return new_actuators, can_sends
 
   def update(self, can_packets):
     # MK4: stash the raw EPS RX_STEER_RELATED (0x147) frame off the main bus so the carcontroller can re-transmit

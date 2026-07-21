@@ -118,11 +118,16 @@ class CarController(CarControllerBase):
                                                   CS.out.vEgoRaw, CS.out.steeringAngleDeg, lat_active,
                                                   CarControllerParams, self.VM)
         # MK4: stop the command from winding far past the measured wheel during EPS under-execution
-        # (see MK4_ANGLE_ERROR_MAX). MK3 (torque path) is unaffected.
+        # (see MK4_ANGLE_ERROR_MAX). When the EPS is not granting angle authority (A_RX != 1), use a
+        # tighter band so we don't keep pushing opposite-signed commands into a non-tracking EPS.
+        # MK3 (torque path) is unaffected.
         if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4 and lat_active:
+          eps_obeying = int(CS.eps_stock_values.get("A_RX_STEER_REQUESTED", 1)) == 1
+          err_max = (CarControllerParams.MK4_ANGLE_ERROR_MAX if eps_obeying
+                     else CarControllerParams.MK4_ANGLE_ERROR_MAX_NOT_OBEYING)
           apply_angle = float(np.clip(apply_angle,
-                                      CS.out.steeringAngleDeg - CarControllerParams.MK4_ANGLE_ERROR_MAX,
-                                      CS.out.steeringAngleDeg + CarControllerParams.MK4_ANGLE_ERROR_MAX))
+                                      CS.out.steeringAngleDeg - err_max,
+                                      CS.out.steeringAngleDeg + err_max))
         can_sends.append(gwmcan.create_steer_command_angle(
           self.packer,
           self.CAN,
