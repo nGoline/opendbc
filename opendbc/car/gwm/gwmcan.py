@@ -140,8 +140,8 @@ def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, a
     # route_c0/route_55 -> brake = 0 / 131068 (regen on), gas/coast = 524288 / 131070. standstill lives in
     # BYPASS_ACC1 (untouched). CRC-safe: BRAKE_GAS_STATE_2 in CRC_BRAKE_0xEF(data[9:16]), BRAKE_GAS_STATE in
     # CRC_ACC_0x87(data[25:32]); both recomputed below.
-    # `regen` is gated by carcontroller's hysteresis (real braking only) so the bit does NOT flip on the
-    # planner's near-zero cruise accel -> avoids the regen pulsing that made longitudinal jerky (drive e6).
+    # `regen` is carcontroller's light accel hysteresis (MK4_REGEN_ON/OFF) so BRAKE_GAS_STATE does not
+    # chatter on planner near-zero cruise accel (drive e6). Independent of BRAKE_OR_GAS_REQ sign(accel).
     if active:
       if regen:
         values["BRAKE_GAS_STATE"] = 0

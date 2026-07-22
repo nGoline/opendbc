@@ -36,7 +36,6 @@ class CarState(CarStateBase):
     self.is_activation_lever_pulled = False
     self.prev_activation_lever_pulled = False
     self.main_on = False
-    self.regen_level = 16  # MK4 driver regen-level selector (msg 726 REGEN_LEVEL): 8=Normal, 16=Low, 24=Heavy. Default Low.
 
     # MK4 own-cruise (pcmCruise=False) button/engage state (see update()).
     self.prev_enable_gesture = False
@@ -64,10 +63,6 @@ class CarState(CarStateBase):
     self.camera_stock_values = copy.copy(cp_cam.vl["STEER_CMD"])
     self.longitudinal_stock_values = copy.copy(cp_cam.vl["ACC_CMD"])
     self.hud_stock_values = copy.copy(cp_cam.vl["LATERAL_STATE"])
-
-    if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
-      # Driver's regen-level setting; carcontroller uses it to set the regen brake-state entry threshold.
-      self.regen_level = int(cp.vl["REGEN_CONFIG"]["REGEN_LEVEL"])
 
     self.parse_wheel_speeds(ret,
       cp.vl["WHEEL_SPEEDS"]["FRONT_LEFT_WHEEL_SPEED"],
@@ -144,10 +139,11 @@ class CarState(CarStateBase):
       ret.steeringTorqueEps = ret.steeringTorque
     else:
       ret.steeringTorqueEps = cp.vl["RX_STEER_RELATED"]["B_RX_EPS_TORQUE"]
-    # steeringPressed gates the REAL lateral override: car_specific.py fires steerOverride (-> OVERRIDE_LATERAL,
-    # openpilot stops steering) whenever this is True. The OEM LKAS keeps steering through driver torque up to ~100 (median handoff) and
-    # tolerates spikes to ~156. Raise the MK4 gate toward that so the driver can rest a hand; MK3 keeps
-    # the stock 50. (carcontroller's debounced override is a secondary, finer gate for a sustained grab.)
+    # Two independent lateral gates on MK4 (do not conflate):
+    # (1) steeringPressed (here): shared car_specific EventName.steerOverride / OVERRIDE_LATERAL. Threshold
+    #     120 ≈ OEM "hands-on" recognition (~102+) so light torque does not spam the shared event. MK3=50.
+    # (2) carcontroller OVERRIDE_TORQUE (100) + debounce: drops lat_active on a sustained grab for the
+    #     angle command path. Tuned for fully hands-off driving (clean takeovers), not "rest a hand".
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
       ret.steeringPressed = abs(ret.steeringTorque) > 120
     else:

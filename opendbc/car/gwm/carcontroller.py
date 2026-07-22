@@ -27,34 +27,27 @@ MK4_HANDS_ON_TORQUE = 120      # floor (was 65): above the OEM hands-on recognit
 MK4_HANDS_ON_TORQUE_MAX = 170  # cap: strong hands-on, still below the driver's real hard grabs (125-214)
 MK4_HANDS_ON_ANGLE_GAIN = 8    # extra spoofed torque per deg of |apply_angle| (mimics MK3's dynamic scaling)
 
-# MK4 override thresholds. This driver NEVER rests a hand on the wheel (fully hands-off), so the old
-# resting-hand-flap concern that pushed these up doesn't apply here — and it was HURTING take-control: on the
-# highway limps (route 110) the driver's grabs to take over read 44-85 and even the real hard grabs 125-214
-# didn't reliably register because the gate sat at 120. Match MK3's threshold (MAX_USER_TORQUE=100) so a genuine
-# grab hands off cleanly, with a firm-grab instant release just above the OEM hands-on point (~102).
-# Debounce still tolerates brief spikes.
-OVERRIDE_TORQUE = 100          # sustained |driver torque| to hand off (was 120; = MK3 MAX_USER_TORQUE).
-OVERRIDE_INSTANT_TORQUE = 150  # firm deliberate grab -> release within one frame for a clean takeover (was 250)
-OVERRIDE_FRAMES = 7            # ~70 ms sustained @100 Hz before engaging override; tolerates brief spikes
-# Once overridden, stay handed-off ~1.0 s before re-asserting, like the OEM LKAS. The old latch
-# re-asserted the instant torque dipped, so openpilot grabbed back "several times a second"; the
-# OEM waits ~1 s before trying again — this hold matches that and stops the flapping.
+# MK4 carcontroller lat_active latch (NOT carstate.steeringPressed — that is the separate shared-code
+# steerOverride event at torque>120). This path drops latActive for STEER_CMD only. Tuned for fully
+# hands-off use: OVERRIDE_TORQUE=100 so a deliberate grab takes over cleanly (route 110 grabs 44–214
+# failed when this sat at 120). Instant path above OEM hands-on (~102). Debounce absorbs spikes.
+OVERRIDE_TORQUE = 100          # sustained |driver torque| to hand off (= MK3 MAX_USER_TORQUE)
+OVERRIDE_INSTANT_TORQUE = 150  # firm grab -> release within one frame
+OVERRIDE_FRAMES = 7            # ~70 ms @100 Hz
+# Hold lat off ~1 s after override (OEM-style) so OP does not re-grab every torque dip.
 OVERRIDE_HOLD_FRAMES = 100
 
 
-# MK4 regen-lead: every real braking demand recovers energy (regen state bit ON), not just deep braking. The old
-# code only enabled regen below accel<-0.5 (Low)/-0.3 (Normal), so mild / hold-speed braking (incl. gentle
-# downhills) was pure friction with the powertrain still in the gas/drive state -- wasting energy and burning pads
-# (verified on the 8h30 drive: 49% of friction frames had regen OFF, readback msg283.b22 ~9 = 0%, while manual
-# driving held b22 ~230 on the same descents). The regen state bit now follows the brake request directly: any
-# accel<0 regenerates. Regen MAGNITUDE stays the powertrain's call (driver Low/Normal/Heavy selector, msg 726).
+# MK4 regen-lead: BRAKE_GAS_STATE (regen enable) uses a light accel hysteresis so cruise chatter around
+# 0 m/s^2 does not flip regen↔coast every frame (drive e6 jerk). BRAKE_OR_GAS_REQ / BRAKE_CMD still
+# follow sign(accel) every frame — do NOT hold brake mode or pin GAS_CMD=0 across a deadband: that
+# FAULTED the OEM ACC (drives 13e-146, "Cruise Fault: Restart the Car"). Regen MAGNITUDE stays the
+# powertrain's call (driver Low/Normal/Heavy on the stalk selector); we only gate the enable state.
 #
-# CAUTION (drives 13e-146, 2026-07-16): an earlier version also pinned GAS_CMD=-192 (raw 0) and held brake mode
-# through a lift-off deadband/hysteresis. That FAULTED the OEM ACC ECU ("Cruise Fault: Restart the Car" / TAKE
-# CONTROL red screen -- accFaulted = ACC.CRUISE_STATE_2==0): under pcmCruise=False the dormant OEM ACC never sees
-# GAS_CMD raw 0, nor a sustained brake request (req=13) held at the -41 brake-off baseline, so it rejected the
-# frame. Those are reverted. Keep the frame otherwise byte-identical to the known-good 8h30 build. Lift-off-level
-# regen (one-pedal feel) + gas/brake anti-dither are deferred until this base regen is confirmed fault-free.
+# Enter regen when accel <= REGEN_ON; leave when accel >= REGEN_OFF or long inactive. Band is small
+# (~0.13 m/s^2) — enough for planner noise, not a deep coast-hold.
+MK4_REGEN_ON_MS2 = -0.08
+MK4_REGEN_OFF_MS2 = 0.05
 
 
 class CarController(CarControllerBase):
@@ -71,7 +64,7 @@ class CarController(CarControllerBase):
     self.override_active = False   # MK4: debounced driver-override latch
     self.override_counter = 0
     self.override_hold = 0         # MK4: frames remaining in the post-override OEM-style hold-off
-    self.regen_brake = False       # MK4: hysteretic braking/regen latch (regen-lead: braking == regen state)
+    self.regen_brake = False       # MK4: hysteretic REGEN state latch (BRAKE_GAS_STATE only; see MK4_REGEN_*)
 
   def update(self, CC, CS, now_nanos):
     can_sends = []
@@ -186,11 +179,16 @@ class CarController(CarControllerBase):
           accel = - abs(self.accel / CarControllerParams.ACCEL_MIN)
         else:
           accel = self.accel / CarControllerParams.ACCEL_MAX
-        # MK4 regen-lead (see note above): every real brake regenerates (regen state == braking). Frame otherwise
-        # byte-identical to the known-good build -- braking is the plain sign of accel, no held-coast, no GAS floor.
+        # braking (BRAKE_OR_GAS_REQ / cmds): plain sign of accel every frame.
+        # regen_brake (BRAKE_GAS_STATE only): light hysteresis — see MK4_REGEN_* above.
         braking = self.accel < 0
         if self.is_mk4:
-          self.regen_brake = CC.longActive and braking
+          if not CC.longActive:
+            self.regen_brake = False
+          elif self.accel <= MK4_REGEN_ON_MS2:
+            self.regen_brake = True
+          elif self.accel >= MK4_REGEN_OFF_MS2:
+            self.regen_brake = False
         can_sends.append(gwmcan.create_longitudinal_command(
           self.packer,
           self.CAN,
@@ -203,7 +201,7 @@ class CarController(CarControllerBase):
           braking=braking,
         ))
 
-    if self.frame % 5 == 0: # 20 Hz
+    if self.frame % 5 == 0:  # 20 Hz
       # HUD updates
       can_sends.append(gwmcan.create_hud_command(
         self.packer,
@@ -213,10 +211,10 @@ class CarController(CarControllerBase):
         is_mk4=self.is_mk4,
       ))
 
-      # MK4 OP_CRUISE: re-TX camera ACC (0x2AB) onto main with openpilot set speed so the Haval
-      # cluster tracks VCruiseHelper. Stock ACC freezes ACC_SPEED_SELECTION once we own long.
-      # Always re-TX while we hold the panda relay slot (check_relay on 0x2AB); only patch speed
-      # when engaged with a real set speed (not V_CRUISE_UNSET=255).
+    # MK4 OP_CRUISE: re-TX camera ACC (0x2AB) onto main with openpilot set speed so the Haval
+    # cluster tracks VCruiseHelper. Match OEM camera rate (~10 Hz; panda RX check 10U) — do not
+    # double-publish a stale raw frame at 20 Hz. Always re-TX while we hold the relay slot.
+    if self.frame % 10 == 0:  # 10 Hz
       if self.is_mk4 and self.CP.openpilotLongitudinalControl and CS.acc_stock_raw is not None:
         hud = CC.hudControl
         set_kph = None

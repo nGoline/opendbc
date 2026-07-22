@@ -22,9 +22,9 @@ class CarControllerParams:
     ([], []), ([], []),    # v1 rate-limit tables unused (vehicle-model path)
     MAX_LATERAL_ACCEL=3.0,  # m/s^2 (~ISO 11270 comfort; OEM route_7a peaked 3.57, so we're already conservative)
     MAX_LATERAL_JERK=2.5,   # m/s^3 — conservative/smooth
-    # Low-speed backstop (jerk limit governs at speed). Was 2.0°/20ms (=100°/s): allowed crawl hunting
-    # in stop-and-go (route 00000008: ~22 err zero-cross/min @0-8 kph, 2s des peak-peak ~10°). 1.0 softens
-    # brake/accel wiggle behind a lead without much cost on highway (jerk still binds there).
+    # Low-speed backstop (jerk limit governs at speed). Was 2.0°/20ms (=100°/s): crawl hunting in
+    # stop-and-go (route 00000008). 1.0 (=50°/s) softens wiggle; may rate-limit tight low-speed turns
+    # (parking/roundabout) — paired with steerActuatorDelay 0.20; if over-damped, raise rate first.
     MAX_ANGLE_RATE=1.0,     # deg per 20ms frame (= 50 deg/s)
   )
 
