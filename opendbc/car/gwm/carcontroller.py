@@ -65,6 +65,10 @@ class CarController(CarControllerBase):
     self.override_counter = 0
     self.override_hold = 0         # MK4: frames remaining in the post-override OEM-style hold-off
     self.regen_brake = False       # MK4: hysteretic REGEN state latch (BRAKE_GAS_STATE only; see MK4_REGEN_*)
+    # OEM cluster (0x2AB): latch last good set-speed + follow dashes so the Vmax icon stays solid
+    # while engaged (OEM: icon always on when ACC active). Avoid thrashing distance every frame.
+    self.acc_cluster_set_kph: float | None = None
+    self.acc_cluster_follow: int | None = None
 
   def update(self, CC, CS, now_nanos):
     can_sends = []
@@ -212,22 +216,40 @@ class CarController(CarControllerBase):
       ))
 
     # MK4 OP_CRUISE: re-TX camera ACC (0x2AB) onto main with openpilot set speed so the Haval
-    # cluster tracks VCruiseHelper. Match OEM camera rate (~10 Hz; panda RX check 10U) — do not
-    # double-publish a stale raw frame at 20 Hz. Always re-TX while we hold the relay slot.
+    # cluster tracks VCruiseHelper. Match OEM camera rate (~10 Hz; panda RX check 10U).
+    # Always re-TX while we hold the relay slot. While engaged: keep set-speed + CRUISE activated
+    # latched (OEM keeps the Vmax icon solid whenever ACC is on — intermittent chrome was from
+    # frozen camera state + thrashing distance on every personality tick).
     if self.frame % 10 == 0:  # 10 Hz
       if self.is_mk4 and self.CP.openpilotLongitudinalControl and CS.acc_stock_raw is not None:
         hud = CC.hudControl
         set_kph = None
-        if CC.enabled and hud.speedVisible:
-          set_kph = float(hud.setSpeed) * CV.MS_TO_KPH
-          if not (0.0 < set_kph < 200.0):
-            set_kph = None
-        # Map openpilot personality bars (1..3) onto OEM follow dashes (1..4): 3 -> 4 (farthest).
         follow = None
-        if CC.enabled and hud.leadDistanceBars > 0:
-          follow = 4 if hud.leadDistanceBars >= 3 else int(hud.leadDistanceBars)
+        cruise_active = bool(CC.enabled)
+        if CC.enabled:
+          raw = float(hud.setSpeed) * CV.MS_TO_KPH if hud.speedVisible else 0.0
+          if 0.0 < raw < 200.0:
+            self.acc_cluster_set_kph = raw
+          # Hold last good set while engaged even if one frame publishes 255/unset
+          set_kph = self.acc_cluster_set_kph
+          if set_kph is None and CS.out.vEgo > 0.5:
+            # First-engage race before VCruiseHelper init: show vEgo floor 20 like cruise.py
+            set_kph = float(np.clip(CS.out.vEgo * CV.MS_TO_KPH, 20.0, 145.0))
+            self.acc_cluster_set_kph = set_kph
+          # Follow dashes: map personality 1..3 -> OEM 1..4; only update latch on change
+          if hud.leadDistanceBars > 0:
+            new_follow = 4 if hud.leadDistanceBars >= 3 else int(hud.leadDistanceBars)
+            if self.acc_cluster_follow is None or new_follow != self.acc_cluster_follow:
+              self.acc_cluster_follow = new_follow
+          follow = self.acc_cluster_follow
+        else:
+          self.acc_cluster_set_kph = None
+          self.acc_cluster_follow = None
         can_sends.append(gwmcan.create_acc_cluster_mk4(
-          self.CAN, CS.acc_stock_raw, set_speed_kph=set_kph, follow_dashes=follow,
+          self.CAN, CS.acc_stock_raw,
+          set_speed_kph=set_kph,
+          follow_dashes=follow,
+          cruise_active=cruise_active,
         ))
 
     new_actuators = actuators.as_builder()

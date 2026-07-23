@@ -287,7 +287,7 @@ def create_hud_command(packer, CAN: CanBus, hud_stock_values, steer_required, is
 
 
 def create_acc_cluster_mk4(CAN: CanBus, acc_stock_raw: bytes, set_speed_kph: float | None = None,
-                          follow_dashes: int | None = None):
+                          follow_dashes: int | None = None, cruise_active: bool = False):
   """Re-TX camera ACC (0x2AB) onto the main bus with openpilot's set speed for the OEM cluster.
 
   Under OP_CRUISE the stock camera freezes ACC_SPEED_SELECTION, so the Haval dash never tracks
@@ -295,9 +295,11 @@ def create_acc_cluster_mk4(CAN: CanBus, acc_stock_raw: bytes, set_speed_kph: flo
   and re-transmit the latest camera frame with:
     byte22 = ACC_SPEED_SELECTION (kph, factor 1)
     optional byte21 low 3 bits = CAR_DISTANCE_SELECTION (1..4 follow dashes)
+    byte18 CRUISE_STATE_2 = 3 (activated) when cruise_active — OEM keeps the set-speed icon
+      solid while ACC is on; frozen camera state left the chrome intermittent (route 0a).
     byte16 = CRC1 = crc8(bytes[17:24], xor=0x40)  — verified 600/600 frames, route 00000008
 
-  When set_speed_kph is None the frame is forwarded byte-identical (still required while we own
+  When set_speed_kph is None the speed field is left as in the camera frame (still re-TX for
   the relay slot). Follow-dashes None leaves the stock distance field untouched.
   """
   b = bytearray(acc_stock_raw)
@@ -306,6 +308,10 @@ def create_acc_cluster_mk4(CAN: CanBus, acc_stock_raw: bytes, set_speed_kph: flo
   if follow_dashes is not None:
     dashes = int(np.clip(follow_dashes, 0, 7))
     b[21] = (b[21] & ~0x07) | (dashes & 0x07)
+  if cruise_active:
+    # CRUISE_STATE_2 packs as state<<3 under mask 0x38 (CANPacker). Keep other bits (e.g. 0x02
+    # in observed 0x1a frames) so we only force the OEM "activated" state (3).
+    b[18] = (b[18] & ~0x38) | (3 << 3)
   b[16] = checksum(bytes(b[17:24]), 0x40)
   return 0x2AB, bytes(b), CAN.main
 
