@@ -236,11 +236,14 @@ class CarController(CarControllerBase):
             # First-engage race before VCruiseHelper init: show vEgo floor 20 like cruise.py
             set_kph = float(np.clip(CS.out.vEgo * CV.MS_TO_KPH, 20.0, 145.0))
             self.acc_cluster_set_kph = set_kph
-          # Follow dashes: map personality 1..3 -> OEM 1..4; only update latch on change
+          # Follow dashes: map personality 1..3 -> OEM 1..4; only update latch on change.
+          # Default to 3 if HUD has not published bars yet — OEM dist 0 = "disabled" (no ICC icon).
           if hud.leadDistanceBars > 0:
             new_follow = 4 if hud.leadDistanceBars >= 3 else int(hud.leadDistanceBars)
             if self.acc_cluster_follow is None or new_follow != self.acc_cluster_follow:
               self.acc_cluster_follow = new_follow
+          if self.acc_cluster_follow is None:
+            self.acc_cluster_follow = 3
           follow = self.acc_cluster_follow
         else:
           self.acc_cluster_set_kph = None

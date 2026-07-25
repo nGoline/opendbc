@@ -294,24 +294,37 @@ def create_acc_cluster_mk4(CAN: CanBus, acc_stock_raw: bytes, set_speed_kph: flo
   openpilot's VCruiseHelper. We block the camera's 0x2AB from being forwarded (panda check_relay)
   and re-transmit the latest camera frame with:
     byte22 = ACC_SPEED_SELECTION (kph, factor 1)
-    optional byte21 low 3 bits = CAR_DISTANCE_SELECTION (1..4 follow dashes)
-    byte18 CRUISE_STATE_2 = 3 (activated) when cruise_active — OEM keeps the set-speed icon
-      solid while ACC is on; frozen camera state left the chrome intermittent (route 0a).
+    byte21 low 3 bits = CAR_DISTANCE_SELECTION (1..4 follow dashes; 0 = disabled / no ICC)
+    byte18 CRUISE_STATE_2 + chrome bits when cruise_active
     byte16 = CRC1 = crc8(bytes[17:24], xor=0x40)  — verified 600/600 frames, route 00000008
 
+  OEM cluster Vmax + ICC chrome (acc_probe / route 0a, 500+ stock activated frames):
+    b18 is always 0x1a when activated (state=3 at bits 3-5 plus constant 0x02), never packer's
+    bare 0x18. Only forcing CRUISE_STATE_2 left intermittent/missing icons when the camera
+    freeze dropped 0x02 or distance went to 0 ("disabled").
+    b21 always has bit5 (0x20) set on stock ACC-UI frames (0x21/0x61/…); low 3 bits = dashes.
+    b17 often has 0x80 while activated — set it when engaged so Vmax chrome stays lit.
+
   When set_speed_kph is None the speed field is left as in the camera frame (still re-TX for
-  the relay slot). Follow-dashes None leaves the stock distance field untouched.
+  the relay slot). Follow-dashes None leaves the stock distance field untouched unless
+  cruise_active requires a non-zero dash for ICC.
   """
   b = bytearray(acc_stock_raw)
   if set_speed_kph is not None:
     b[22] = int(round(float(np.clip(set_speed_kph, 0.0, 255.0)))) & 0xFF
   if follow_dashes is not None:
-    dashes = int(np.clip(follow_dashes, 0, 7))
+    dashes = int(np.clip(follow_dashes, 1, 4))  # 0 = OEM "disabled" (hides ICC)
     b[21] = (b[21] & ~0x07) | (dashes & 0x07)
   if cruise_active:
-    # CRUISE_STATE_2 packs as state<<3 under mask 0x38 (CANPacker). Keep other bits (e.g. 0x02
-    # in observed 0x1a frames) so we only force the OEM "activated" state (3).
-    b[18] = (b[18] & ~0x38) | (3 << 3)
+    # Exact stock activated pattern (not only state nibble): 0x1a on every eng frame in logs.
+    b[18] = (b[18] & ~0x3F) | 0x1A
+    # ICC / follow UI: never leave dashes at 0; keep stock 0x20 chrome bit.
+    dist = b[21] & 0x07
+    if dist == 0:
+      dist = 1
+    b[21] = (b[21] & ~0x07) | dist | 0x20
+    # Vmax chrome assist (common on stock activated frames)
+    b[17] = b[17] | 0x80
   b[16] = checksum(bytes(b[17:24]), 0x40)
   return 0x2AB, bytes(b), CAN.main
 
