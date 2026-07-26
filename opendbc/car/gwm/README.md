@@ -58,7 +58,9 @@ Distance:   wheel follow buttons → gapAdjustCruise → openpilot personality (
 - `steerTempUnavailable` gated on real wheel divergence + EPS not obeying (not raw EPS fault bit).
 - `MK4_ANGLE_ERROR_MAX` / not-obeying clip to reduce command windup vs EPS lag.
 - Hands-on keepalive (spoofed torque on 0x147 → camera) to avoid OEM hands-off limp.
-- Debounced lateral override (`OVERRIDE_TORQUE` 100 / instant 150) separate from shared `steeringPressed` (>120).
+- Debounced lateral override (`OVERRIDE_TORQUE` 100 / instant 150) separate from shared `steeringPressed`.
+- MK4 `steeringPressed` **hysteresis** ON **140** / OFF **100** (was flat 120) — less "take control" / steerOverride spam.
+- MK4 `cruiseState.available` = in **Drive** and not acc-faulted (not only after stalk). Brake no longer clears main_on (cancel only) — cuts wrongCarMode flood.
 
 ### Longitudinal / cruise (openpilot + opendbc)
 - OP_CRUISE: set-speed owned by openpilot (`pcmCruise=False`).
@@ -112,6 +114,7 @@ Distance:   wheel follow buttons → gapAdjustCruise → openpilot personality (
 | Item | Priority | Notes |
 |------|----------|--------|
 | **Road-validate cluster Vmax icon** | High | After solid-icon deploy: icon should stay on while engaged (OEM-like). Confirm number + chrome. |
+| **Road-validate steer hysteresis + wrongCarMode** | High | Route 00000016 baseline: ~3.9k steerOverride, ~11k wrongCarMode — expect large drop. |
 | **First-engage vCruise=255 races** | Medium | Hardened in code; confirm on next drive logs. |
 | **Low-speed steer feel** | Medium | 8–15 km/h improved; crawl metrics noisy; re-check parking/roundabouts with rate 1.0. |
 | **Highway / >60 km/h validation** | Medium | Limited urban-only routes so far (max ~50 km/h in analyzed drives). |

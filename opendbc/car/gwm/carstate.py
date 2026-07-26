@@ -20,6 +20,13 @@ ButtonType = structs.CarState.ButtonEvent.Type
 MK4_CRUISE_LONG_PRESS = 50  # mirrors CRUISE_LONG_PRESS in selfdrive/car/cruise.py
 MK4_SCROLL_HOLD = MK4_CRUISE_LONG_PRESS + 4  # 54
 
+# MK4 steeringPressed hysteresis (shared EventName.steerOverride / "take control"):
+# route 00000016: eng+lat p90 |tq|~90, real grabs 122–257. Flat threshold 120 chattered at the
+# edge and flooded logs/UI when a hand rested near the limit. Enter pressed above 140; leave
+# below 100 (matches carcontroller OVERRIDE_TORQUE release band).
+MK4_STEER_PRESSED_ON = 140
+MK4_STEER_PRESSED_OFF = 100
+
 
 class CarState(CarStateBase):
   def __init__(self, CP):
@@ -36,6 +43,7 @@ class CarState(CarStateBase):
     self.is_activation_lever_pulled = False
     self.prev_activation_lever_pulled = False
     self.main_on = False
+    self.steer_pressed_latched = False  # MK4 hysteresis for steeringPressed
 
     # MK4 own-cruise (pcmCruise=False) button/engage state (see update()).
     self.prev_enable_gesture = False
@@ -140,12 +148,18 @@ class CarState(CarStateBase):
     else:
       ret.steeringTorqueEps = cp.vl["RX_STEER_RELATED"]["B_RX_EPS_TORQUE"]
     # Two independent lateral gates on MK4 (do not conflate):
-    # (1) steeringPressed (here): shared car_specific EventName.steerOverride / OVERRIDE_LATERAL. Threshold
-    #     120 ≈ OEM "hands-on" recognition (~102+) so light torque does not spam the shared event. MK3=50.
+    # (1) steeringPressed (here): shared car_specific EventName.steerOverride / OVERRIDE_LATERAL.
+    #     Hysteresis ON 140 / OFF 100 — flat 120 spammed "take control" and long steerOverride streaks
+    #     near the edge (route 00000016). MK3 stays a flat 50.
     # (2) carcontroller OVERRIDE_TORQUE (100) + debounce: drops lat_active on a sustained grab for the
     #     angle command path. Tuned for fully hands-off driving (clean takeovers), not "rest a hand".
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
-      ret.steeringPressed = abs(ret.steeringTorque) > 120
+      tq = abs(ret.steeringTorque)
+      if self.steer_pressed_latched:
+        self.steer_pressed_latched = tq > MK4_STEER_PRESSED_OFF
+      else:
+        self.steer_pressed_latched = tq > MK4_STEER_PRESSED_ON
+      ret.steeringPressed = self.steer_pressed_latched
     else:
       ret.steeringPressed = abs(ret.steeringTorque) > 50
 
@@ -160,7 +174,13 @@ class CarState(CarStateBase):
     ret.rightBlindspot = bool(cp.vl["RADAR_BEHIND"]["BSM_RIGHT"] > 0)
 
     cancel = bool(cp.vl["STEER_AND_AP_STALK"]["AP_CANCEL_COMMAND"])
-    if cancel or ret.brakePressed:
+    if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
+      # Only stalk/button cancel drops main_on. Brake already cancels *enabled* via selfdrived
+      # pedalPressed; clearing available on every brake flooded wrongCarMode for most of route
+      # 00000016 (~11k events) and forced a re-arm before re-engage.
+      if cancel:
+        self.main_on = False
+    elif cancel or ret.brakePressed:
       self.main_on = False
 
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
@@ -168,8 +188,7 @@ class CarState(CarStateBase):
       # the wheel/stalk buttons, NOT the OEM ACC (which freezes its set speed once openpilot owns the car).
       # Engagement is the gentle-or-further DOWN stalk gesture (msg 0xC7 GEAR_STALK bit STALK_DOWN) so a
       # gentle DOWN also engages, not just the hard FURTHER_DOWN detent. The panda arms its controls latch
-      # on the same bit (gwm.h, gated on GwmSafetyFlags.OP_CRUISE); cruiseState.available mirrors our latch
-      # so the two safety gates never desync.
+      # on the same bit (gwm.h, gated on GwmSafetyFlags.OP_CRUISE).
       enable_gesture = bool(cp.vl["GEAR_STALK"]["STALK_DOWN"])
       # DOWN is the same physical motion as shifting N→D / R→D, so gate engagement to when the gear
       # is already D (this frame and last) and the car is moving — a gear shift must not auto-engage. Latch
@@ -214,7 +233,10 @@ class CarState(CarStateBase):
       self.prev_cancel = int(cancel)
       self.prev_drive_mode = drive_mode
 
-      ret.cruiseState.available = self.main_on
+      # Available whenever in Drive and ACC not faulted — not only after stalk arm. Coupling available
+      # to main_on made wrongCarMode fire for entire segments until the next engage (route 00000016:
+      # ~11k wrongCarMode). Stalk still required for enable; cancel still drops main_on.
+      ret.cruiseState.available = bool(drive_mode == 1) and not ret.accFaulted
       # pcmCruise=False: selfdrived owns cruiseState.enabled — don't set it here.
     else:
       # MK3 (unchanged): pcmCruise=True, engage latch off the AP_ENABLE stalk gesture's falling edge.
