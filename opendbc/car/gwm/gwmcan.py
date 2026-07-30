@@ -305,8 +305,7 @@ def create_hud_command(packer, CAN: CanBus, hud_stock_values, steer_required, is
 
 
 def create_acc_cluster_mk4(CAN: CanBus, acc_stock_raw: bytes, set_speed_kph: float | None = None,
-                          follow_dashes: int | None = None, cruise_active: bool = False,
-                          cruise_standby: bool = False):
+                          follow_dashes: int | None = None, cruise_active: bool = False):
   """Re-TX camera ACC (0x2AB) onto the main bus with openpilot's set speed for the OEM cluster.
 
   Under OP_CRUISE the stock camera freezes ACC_SPEED_SELECTION, so the Haval dash never tracks
@@ -314,7 +313,7 @@ def create_acc_cluster_mk4(CAN: CanBus, acc_stock_raw: bytes, set_speed_kph: flo
   and re-transmit the latest camera frame with:
     byte22 = ACC_SPEED_SELECTION (kph, factor 1)
     byte21 low 3 bits = CAR_DISTANCE_SELECTION (1..4 follow dashes; 0 = disabled / no ICC)
-    byte18 CRUISE_STATE_2 + chrome bits when cruise_active / standby
+    byte18 CRUISE_STATE_2 + chrome bits when cruise_active
     byte16 = CRC1 = crc8(bytes[17:24], xor=0x40)  — verified 600/600 frames, route 00000008
 
   OEM cluster Vmax + ICC chrome (acc_probe / route 0a, 500+ stock activated frames):
@@ -324,13 +323,9 @@ def create_acc_cluster_mk4(CAN: CanBus, acc_stock_raw: bytes, set_speed_kph: flo
     b21 always has bit5 (0x20) set on stock ACC-UI frames (0x21/0x61/…); low 3 bits = dashes.
     b17 often has 0x80 while activated — set it when engaged so Vmax chrome stays lit.
 
-  Quiet brake-cancel (OEM dual chime): stock Haval beeps loudly on activated→deactivated (0x1a→0x0a).
-  Cancel with turn-signal first is quiet (OEM treats it as a soft path). When openpilot disengages
-  but cruise is still "available" (Drive), demote to **available** 0x12 instead of deactivated 0x0a.
-
   When set_speed_kph is None the speed field is left as in the camera frame (still re-TX for
   the relay slot). Follow-dashes None leaves the stock distance field untouched unless
-  cruise_active/standby requires a non-zero dash for ICC.
+  cruise_active requires a non-zero dash for ICC.
   """
   b = bytearray(acc_stock_raw)
   if set_speed_kph is not None:
@@ -348,14 +343,6 @@ def create_acc_cluster_mk4(CAN: CanBus, acc_stock_raw: bytes, set_speed_kph: flo
     b[21] = (b[21] & ~0x07) | dist | 0x20
     # Vmax chrome assist (common on stock activated frames)
     b[17] = b[17] | 0x80
-  elif cruise_standby:
-    # Soft demote after OP cancel (e.g. brake): available (0x12), not deactivated (0x0a).
-    # Stock logs: st=2 → b18=0x12. Avoids OEM dual-beep on activated→off.
-    b[18] = (b[18] & ~0x3F) | 0x12
-    dist = b[21] & 0x07
-    if dist == 0:
-      dist = 1
-    b[21] = (b[21] & ~0x07) | dist | 0x20
   b[16] = checksum(bytes(b[17:24]), 0x40)
   return 0x2AB, bytes(b), CAN.main
 

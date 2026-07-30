@@ -228,8 +228,6 @@ class CarController(CarControllerBase):
         set_kph = None
         follow = None
         cruise_active = bool(CC.enabled)
-        # In Drive with OP available but not enabled: soft ACC "available" (quiet cancel path).
-        cruise_standby = (not cruise_active) and bool(CS.out.cruiseState.available)
         if CC.enabled:
           raw = float(hud.setSpeed) * CV.MS_TO_KPH if hud.speedVisible else 0.0
           if 0.0 < raw < 200.0:
@@ -250,19 +248,13 @@ class CarController(CarControllerBase):
             self.acc_cluster_follow = 3
           follow = self.acc_cluster_follow
         else:
-          # Keep latched set/follow for soft standby demote (quiet OEM cancel); clear off Drive.
-          if cruise_standby:
-            set_kph = self.acc_cluster_set_kph
-            follow = self.acc_cluster_follow
-          else:
-            self.acc_cluster_set_kph = None
-            self.acc_cluster_follow = None
+          self.acc_cluster_set_kph = None
+          self.acc_cluster_follow = None
         can_sends.append(gwmcan.create_acc_cluster_mk4(
           self.CAN, CS.acc_stock_raw,
           set_speed_kph=set_kph,
           follow_dashes=follow,
           cruise_active=cruise_active,
-          cruise_standby=cruise_standby,
         ))
 
     new_actuators = actuators.as_builder()
