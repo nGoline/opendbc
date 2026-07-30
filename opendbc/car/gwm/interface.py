@@ -71,6 +71,12 @@ class CarInterface(CarInterfaceBase):
           # Camera ACC (0x2AB) on cam bus — re-TX to main with openpilot set speed (cluster display)
           if address == 0x2AB and src == 2:
             self.CS.acc_stock_raw = bytes(dat)
+          # ACC_CMD / LATERAL_STATE: keep raw camera frames so packer cannot zero unmodeled
+          # bytes that the OEM cluster uses for Vmax/ICC chrome (route 00000020 eng).
+          if address == 0x143 and src == 2:
+            self.CS.acc_cmd_stock_raw = bytes(dat)
+          if address == 0x23D and src == 2:
+            self.CS.hud_stock_raw = bytes(dat)
 
     ret = super().update(can_packets)
 

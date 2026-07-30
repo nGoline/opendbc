@@ -93,7 +93,7 @@ def create_steer_command(packer, CAN: CanBus, camera_stock_values, steer: float,
   return packer.make_can_msg("STEER_CMD", CAN.main, values)
 
 
-def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, active, standstill, is_mk4: bool, regen: bool = False, braking: bool | None = None):
+def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, active, standstill, is_mk4: bool, regen: bool = False, braking: bool | None = None, longitudinal_stock_raw: bytes | None = None):
   # the powertrain brake-vs-gas state fields were renamed in the MK4 DBC; the MK3 DBC still calls
   # them BYPASSME_1 / BYPASS_ACC2 — reading the MK4 names unconditionally raised KeyError on MK3
   # (same crash class create_buttons_command already guards against, in the other direction)
@@ -180,6 +180,14 @@ def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, a
   values["CRC_BRAKE_0xEF"] = checksum(data[9:16], 0xEF)
   values["CRC_ACC_0x87"] = checksum(data[25:32], 0x87)
 
+  packed = packer.make_can_msg("ACC_CMD", 0, values)[1]
+  # MK4: DBC only models ~bytes 8-31. Packer zeros 0-7 and 32-63 — route 00000020 eng showed
+  # those camera bytes live (session/chrome). Keep the stock shell and overlay control block.
+  if is_mk4 and longitudinal_stock_raw is not None and len(longitudinal_stock_raw) >= 64 and len(packed) >= 32:
+    out = bytearray(longitudinal_stock_raw)
+    out[8:32] = packed[8:32]
+    return 0x143, bytes(out), CAN.main
+
   return packer.make_can_msg("ACC_CMD", CAN.main, values)
 
 
@@ -258,7 +266,17 @@ def create_buttons_command(packer, CAN: CanBus, counter, stock_msg, cancel_comma
   return packer.make_can_msg('STEER_AND_AP_STALK', CAN.camera, values)
 
 
-def create_hud_command(packer, CAN: CanBus, hud_stock_values, steer_required, is_mk4: bool):
+def create_hud_command(packer, CAN: CanBus, hud_stock_values, steer_required, is_mk4: bool, hud_stock_raw: bytes | None = None):
+  # MK4: packer rebuild of LATERAL_STATE zeros most of the 64-byte camera frame (route 00000020:
+  # bytes 8/15/16/17/23/… always differ). Cluster chrome likely needs that shell. Patch LKAS only.
+  if is_mk4 and hud_stock_raw is not None and len(hud_stock_raw) >= 24:
+    b = bytearray(hud_stock_raw)
+    if steer_required:
+      # LKAS_STATE=5 packs as bits 3-5 of byte17 (0x28); keep other chrome bits from camera.
+      b[17] = (b[17] & ~0x38) | 0x28
+    b[16] = checksum(bytes(b[17:24]), 0x66)
+    return 0x23D, bytes(b), CAN.main
+
   values = {s: hud_stock_values[s] for s in [
     "BYPASSME_1",
     "BYPASSME_2",

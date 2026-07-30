@@ -35,6 +35,8 @@ class CarState(CarStateBase):
     self.eps_stock_values = {}
     self.eps_stock_raw = None  # MK4: raw bytes of the last EPS RX_STEER_RELATED (0x147) frame, for the camera hands-on keepalive
     self.acc_stock_raw = None  # MK4: raw bytes of camera ACC (0x2AB), for cluster set-speed re-TX
+    self.acc_cmd_stock_raw = None  # MK4: raw ACC_CMD (0x143) — packer zeros unmodeled bytes
+    self.hud_stock_raw = None  # MK4: raw LATERAL_STATE (0x23D) for cluster/HUD chrome
     self.camera_stock_values = {}
     self.longitudinal_stock_values = {}
     self.hud_stock_values = {}

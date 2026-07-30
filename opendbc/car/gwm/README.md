@@ -81,7 +81,7 @@ Distance:   wheel follow buttons → gapAdjustCruise → openpilot personality (
   - Follow dashes latched from personality; default **3** if HUD bars not ready yet.
   - Fallback set from vEgo (floor 20) if first-engage still unset for a frame.
 - Panda safety: **0x2AB** on long TX list with `check_relay` (firmware rebuild + flash required once).
-- If icons still missing after this: probe `BYPASSME_CRUISE` on LATERAL_STATE `0x23D` next.
+- **Packer zeroing (2026-07-29):** `ACC_CMD`/`LATERAL_STATE` packer rebuilds wiped camera bytes 0–7 and 32–63 / most of HUD (route 20 eng). MK4 now re-TX **raw camera shell** for ACC_CMD (overlay control block 8–31) and HUD (patch LKAS only). Re-test cluster icons after deploy.
 
 ### Fingerprint / bring-up
 - `FINGERPRINTS` CAN map + force fingerprint / skip FW query in openpilot launch env for reliable ID after wipe.

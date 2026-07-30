@@ -203,6 +203,7 @@ class CarController(CarControllerBase):
           is_mk4=self.is_mk4,
           regen=self.regen_brake,
           braking=braking,
+          longitudinal_stock_raw=CS.acc_cmd_stock_raw if self.is_mk4 else None,
         ))
 
     if self.frame % 5 == 0:  # 20 Hz
@@ -213,6 +214,7 @@ class CarController(CarControllerBase):
         hud_stock_values=CS.hud_stock_values,
         steer_required=CC.latActive,
         is_mk4=self.is_mk4,
+        hud_stock_raw=CS.hud_stock_raw if self.is_mk4 else None,
       ))
 
     # MK4 OP_CRUISE: re-TX camera ACC (0x2AB) onto main with openpilot set speed so the Haval
