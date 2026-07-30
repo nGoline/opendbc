@@ -82,6 +82,7 @@ Distance:   wheel follow buttons → gapAdjustCruise → openpilot personality (
   - Fallback set from vEgo (floor 20) if first-engage still unset for a frame.
 - Panda safety: **0x2AB** on long TX list with `check_relay` (firmware rebuild + flash required once).
 - **Packer zeroing (2026-07-29):** `ACC_CMD`/`LATERAL_STATE` packer rebuilds wiped camera bytes 0–7 and 32–63 / most of HUD (route 20 eng). MK4 now re-TX **raw camera shell** for ACC_CMD (overlay control block 8–31) and HUD (patch LKAS only). Re-test cluster icons after deploy.
+- **OEM cancel chime:** Haval dual-beep is stock (not comma). Loud on activated→deactivated (`0x1a`→`0x0a`); quieter with turn-signal-first cancel. On OP brake-cancel while still in Drive, demote ACC `0x2AB` to **available `0x12`** (standby) instead of deactivated.
 
 ### Fingerprint / bring-up
 - `FINGERPRINTS` CAN map + force fingerprint / skip FW query in openpilot launch env for reliable ID after wipe.
