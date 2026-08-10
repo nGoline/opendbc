@@ -113,10 +113,10 @@ Distance:   wheel follow buttons → gapAdjustCruise → openpilot personality (
 
 | Item | Priority | Notes |
 |------|----------|--------|
-| **Cluster Vmax + ICC icons still missing** | High | Forcing `0x2AB` b18/b17/b21 not enough on road; raw ACC_CMD/HUD re-TX still needs validation + bit reverse. |
-| **Lateral “soquinhos” in light curves** | High | Suspect `latActive` flicker and/or angle clip vs EPS under-hold; needs rlog of cmd vs wheel + active. |
-| **Engage without steering feel** | High | `latActive` needs `active` (not only enabled) + no steer fault + not standstill (`steerAtStandstill=False`). |
-| **OEM dual-beep on brake cancel** | Medium | Soft demote `0x12` **reverted** — rlogs show same `0x1a→0x0a` with/without blinker; not the quiet path. |
+| **Cluster Vmax + ICC icons** | Fixed (code) | Root cause (route 57, 4137 frames): ACC_CMD b23 counter DEAD — 64-bit `BYPASSME_2` (b16–23, CRC@16+counter@23) truncated by float64 in the parser. Fix: preserve raw b16–23. Road-validate. |
+| **Lateral “soquinhos” in light curves** | Fixed (code) | Root cause: carcontroller override latch false-tripping on hands-off EPS reaction torque (routes 56/57: 21 trips, tq 100–134, press=False). Latch now 130/170/10 (route 1f sim: 0 false, real grabs kept). Road-validate. |
+| **Engage without steering feel** | Understood | The “latActive False 14%” windows are all ~1 kph stops: standstill gate with `steerAtStandstill=False`. Expected behavior, not a defect. |
+| **OEM dual-beep on brake cancel** | Fixed (code) | Beep = 2 cluster transitions (`0x1a→0x0a→0x12`). Old demote never hit the wire (only patched while enabled). New: ~2 s post-cancel grace masks `0x0a`, lands 0x12 direct. Road-validate. |
 | **Engage set 105 kph** | Done (code) | Experimental mode used `V_CRUISE_INITIAL_EXPERIMENTAL_MODE=105` as floor; GWM now always uses vEgo/20. |
 | **Low-speed steer feel** | Medium | 8–15 km/h improved; crawl metrics noisy; re-check parking/roundabouts with rate 1.0. |
 | **Highway / >60 km/h validation** | Medium | Limited urban-only routes so far (max ~50 km/h in analyzed drives). |
