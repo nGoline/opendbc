@@ -186,6 +186,12 @@ def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, a
   if is_mk4 and longitudinal_stock_raw is not None and len(longitudinal_stock_raw) >= 64 and len(packed) >= 32:
     out = bytearray(longitudinal_stock_raw)
     out[8:32] = packed[8:32]
+    # b16-23 is the opaque BYPASSME_2 block (own CRC@16 + counter@23, like every GWM 64-byte
+    # frame). Passing it through the parser as a 64-bit signal loses the low 11 bits to float64,
+    # so the packed b23 counter is DEAD 0x00 (route 57: 4137/4137 engaged frames, camera cycling)
+    # and receivers drop the frame — suspected Vmax/ICC icon killer. Our control fields don't
+    # live there (b9-15 + b24-31, each with its own CRC), so keep the camera's live block.
+    out[16:24] = longitudinal_stock_raw[16:24]
     return 0x143, bytes(out), CAN.main
 
   return packer.make_can_msg("ACC_CMD", CAN.main, values)
