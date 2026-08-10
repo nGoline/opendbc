@@ -73,6 +73,8 @@ class CarController(CarControllerBase):
     # while engaged (OEM: icon always on when ACC active). Avoid thrashing distance every frame.
     self.acc_cluster_set_kph: float | None = None
     self.acc_cluster_follow: int | None = None
+    self.enabled_prev = False        # MK4: falling-edge detect for the quiet-cancel grace
+    self.cancel_demote_frames = 0    # MK4: frames left masking the camera's 0x0a standby step post-cancel
 
   def update(self, CC, CS, now_nanos):
     can_sends = []
@@ -96,6 +98,17 @@ class CarController(CarControllerBase):
         self.override_active = True
         self.override_hold = OVERRIDE_HOLD_FRAMES
       lat_active = CC.latActive and not self.override_active
+
+      # Quiet-cancel grace: on disengage, hold ~2 s masking the camera's 0x1a->0x0a standby step
+      # on the 0x2AB re-TX (see create_acc_cluster_mk4) so the cluster sees one state transition,
+      # not the dual-beep pair. Re-engage clears it immediately.
+      if CC.enabled:
+        self.cancel_demote_frames = 0
+      elif self.enabled_prev:
+        self.cancel_demote_frames = 200  # ~2 s @100 Hz
+      else:
+        self.cancel_demote_frames = max(0, self.cancel_demote_frames - 1)
+      self.enabled_prev = CC.enabled
     else:
       lat_active = CC.latActive and abs(CS.out.steeringTorque) < MAX_USER_TORQUE
 
@@ -259,6 +272,7 @@ class CarController(CarControllerBase):
           set_speed_kph=set_kph,
           follow_dashes=follow,
           cruise_active=cruise_active,
+          cancel_demote=self.cancel_demote_frames > 0,
         ))
 
     new_actuators = actuators.as_builder()
