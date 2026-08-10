@@ -29,11 +29,15 @@ MK4_HANDS_ON_ANGLE_GAIN = 8    # extra spoofed torque per deg of |apply_angle| (
 
 # MK4 carcontroller lat_active latch (NOT carstate.steeringPressed — that is the separate shared-code
 # steerOverride event at torque>120). This path drops latActive for STEER_CMD only. Tuned for fully
-# hands-off use: OVERRIDE_TORQUE=100 so a deliberate grab takes over cleanly (route 110 grabs 44–214
-# failed when this sat at 120). Instant path above OEM hands-on (~102). Debounce absorbs spikes.
-OVERRIDE_TORQUE = 100          # sustained |driver torque| to hand off (= MK3 MAX_USER_TORQUE)
-OVERRIDE_INSTANT_TORQUE = 150  # firm grab -> release within one frame
-OVERRIDE_FRAMES = 7            # ~70 ms @100 Hz
+# hands-off use. 100 sustained was the "soquinho" cause: the torque sensor reads EPS reaction torque
+# up to ~134 hands-off in light curves (routes 56/57/58: >100 for 8-23% of curve time), so the latch
+# false-tripped ~1x/36s engaged and released the wheel mid-curve for the 1 s hold. 100 Hz replay on
+# route 1f: 130/170 keeps every real grab (2/2) with ZERO hands-off trips (sustained hands-off never
+# exceeds 140; longest run >120 was 160 ms). Trade-off: a gentle grab below 130 sustained no longer
+# hands off (the old reason for 100) — accepted, it cost a soquinho every ~36 s.
+OVERRIDE_TORQUE = 130          # sustained |driver torque| to hand off; hands-off peaks (~134) are single frames, absorbed by debounce
+OVERRIDE_INSTANT_TORQUE = 170  # firm grab -> release within one frame
+OVERRIDE_FRAMES = 10           # ~100 ms @100 Hz
 # Hold lat off ~1 s after override (OEM-style) so OP does not re-grab every torque dip.
 OVERRIDE_HOLD_FRAMES = 100
 
