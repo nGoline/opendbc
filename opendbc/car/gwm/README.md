@@ -64,7 +64,7 @@ Distance:   wheel follow buttons → gapAdjustCruise → openpilot personality (
 
 ### Longitudinal / cruise (openpilot + opendbc)
 - OP_CRUISE: set-speed owned by openpilot (`pcmCruise=False`).
-- Engage set-speed: **max(vEgo, 20 kph)** for GWM (not stock 40 kph floor).
+- Engage set-speed: **max(vEgo, 20 kph)** for GWM always (not stock 40 chill / **105 experimental** floor).
 - Preserve set-speed across `available=False` cancel (non-pcm); never poison `v_cruise_kph_last` with 255.
 - Stricter engage init so `vCruise` does not stay **255**.
 - Regen: light hysteresis **ON ≤ −0.08**, **OFF ≥ +0.05** m/s² on **BRAKE_GAS_STATE only** (does not hold `BRAKE_OR_GAS_REQ` — that faulted OEM ACC).
@@ -113,9 +113,11 @@ Distance:   wheel follow buttons → gapAdjustCruise → openpilot personality (
 
 | Item | Priority | Notes |
 |------|----------|--------|
-| **Road-validate cluster Vmax icon** | High | After solid-icon deploy: icon should stay on while engaged (OEM-like). Confirm number + chrome. |
-| **Road-validate steer hysteresis + wrongCarMode** | High | Route 00000016 baseline: ~3.9k steerOverride, ~11k wrongCarMode — expect large drop. |
-| **First-engage vCruise=255 races** | Medium | Hardened in code; confirm on next drive logs. |
+| **Cluster Vmax + ICC icons still missing** | High | Forcing `0x2AB` b18/b17/b21 not enough on road; raw ACC_CMD/HUD re-TX still needs validation + bit reverse. |
+| **Lateral “soquinhos” in light curves** | High | Suspect `latActive` flicker and/or angle clip vs EPS under-hold; needs rlog of cmd vs wheel + active. |
+| **Engage without steering feel** | High | `latActive` needs `active` (not only enabled) + no steer fault + not standstill (`steerAtStandstill=False`). |
+| **OEM dual-beep on brake cancel** | Medium | Soft demote `0x12` **reverted** — rlogs show same `0x1a→0x0a` with/without blinker; not the quiet path. |
+| **Engage set 105 kph** | Done (code) | Experimental mode used `V_CRUISE_INITIAL_EXPERIMENTAL_MODE=105` as floor; GWM now always uses vEgo/20. |
 | **Low-speed steer feel** | Medium | 8–15 km/h improved; crawl metrics noisy; re-check parking/roundabouts with rate 1.0. |
 | **Highway / >60 km/h validation** | Medium | Limited urban-only routes so far (max ~50 km/h in analyzed drives). |
 | **Fingerprint without force env** | Low | Prefer pure CAN/FW ID after more routes. |
