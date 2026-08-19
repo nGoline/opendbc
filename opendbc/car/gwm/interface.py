@@ -1,0 +1,55 @@
+from opendbc.car import CanBusBase, get_safety_config, structs
+from opendbc.car.interfaces import CarInterfaceBase
+from opendbc.car.gwm.carcontroller import CarController
+from opendbc.car.gwm.carstate import CarState
+from opendbc.car.gwm.values import WHEEL_SPEED_FACTOR
+
+STEER_CMD_ADDR = 0x12b
+
+
+class CarInterface(CarInterfaceBase):
+  CarState = CarState
+  CarController = CarController
+
+  def __init__(self, CP):
+    super().__init__(CP)
+    # STEER_CMD is transmitted by the forward camera. Once the harness relay opens
+    # it is only ever seen on the camera bus - measured across a full openpilot-
+    # engaged drive, 0x12b appeared 2999 times on bus 2 and zero times on bus 0.
+    # Watching bus 0 for it means never seeing it, and never steering.
+    self.cam_bus = CanBusBase(CP, None).offset + 2
+
+  def update(self, can_packets):
+    # Grab the camera's raw STEER_CMD before parsing, so the controller can patch
+    # that exact frame rather than compose one.
+    for _, msgs in can_packets:
+      for msg in msgs:
+        if msg.address == STEER_CMD_ADDR and msg.src == self.cam_bus:
+          self.CS.stock_steer_cmd = bytes(msg.dat)
+    return super().update(can_packets)
+
+  @staticmethod
+  def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:
+    ret.brand = 'gwm'
+
+    # Lateral only. The stock ACC keeps handling speed; openpilot steers by angle.
+    #
+    # The steering command (STEER_CMD, 0x12b) is gated frame-to-frame by two plain
+    # CRC-8s that we recompute, so it can be sent without any key. See gwmcan.
+    ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.gwm)]
+    ret.steerControlType = structs.CarParams.SteerControlType.angle
+    ret.steerAtStandstill = True
+
+    # Measured on this car: the EPS angle readback (0x245) lags the commanded angle
+    # by ~0.08 s. Left at the 0.0 default the angle controller has no lead at all
+    # and hunts.
+    ret.steerActuatorDelay = 0.08
+    ret.steerLimitTimer = 0.4
+
+    ret.wheelSpeedFactor = WHEEL_SPEED_FACTOR
+    ret.radarUnavailable = True
+
+    # Longitudinal stays with the stock ACC for now, so engagement follows it.
+    ret.alphaLongitudinalAvailable = False
+
+    return ret

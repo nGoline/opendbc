@@ -2,6 +2,7 @@ from typing import NamedTuple
 
 from opendbc.car.chrysler.values import CAR as CHRYSLER
 from opendbc.car.gm.values import CAR as GM
+from opendbc.car.gwm.values import CAR as GWM
 from opendbc.car.ford.values import CAR as FORD
 from opendbc.car.honda.values import CAR as HONDA
 from opendbc.car.hyundai.values import CAR as HYUNDAI
@@ -28,6 +29,7 @@ non_tested_cars = [
   SUBARU.SUBARU_FORESTER_HYBRID,
   VOLKSWAGEN.PORSCHE_MACAN_MK1,
   HONDA.ACURA_TLX_2G,
+  GWM.GWM_HAVAL_H6_PHEV19_MK4,  # routes are private, not on comma's servers
 
   # These had their DSUs unplugged, need new routes
   # TOYOTA.LEXUS_ES  # hybrid
