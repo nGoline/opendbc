@@ -89,23 +89,44 @@ class CAR(Platforms):
   )
 
 
-# Both DIDs come back concatenated in a single response, so the request has to
-# ask for them together rather than one at a time:
+# The DIDs come back concatenated in a single response, so the request asks for
+# them together rather than one at a time:
 #   b'\xf1\x873612100XEB83000\xf1\x89S013A01XKN34003'
+# The engine ECU answers F187 and F189 and ignores F182, so only two come back.
 GWM_VERSION_REQUEST = bytes([uds.SERVICE_TYPE.READ_DATA_BY_IDENTIFIER]) + \
   p16(uds.DATA_IDENTIFIER_TYPE.VEHICLE_MANUFACTURER_SPARE_PART_NUMBER) + \
-  p16(uds.DATA_IDENTIFIER_TYPE.VEHICLE_MANUFACTURER_ECU_SOFTWARE_VERSION_NUMBER)
+  p16(uds.DATA_IDENTIFIER_TYPE.VEHICLE_MANUFACTURER_ECU_SOFTWARE_VERSION_NUMBER) + \
+  p16(uds.DATA_IDENTIFIER_TYPE.APPLICATION_DATA_IDENTIFICATION)
 
 GWM_VERSION_RESPONSE = bytes([uds.SERVICE_TYPE.READ_DATA_BY_IDENTIFIER + 0x40])
 
+# Some ECUs on this platform answer at request + 0x6a instead of the usual + 0x8.
+GWM_RX_OFFSET = 0x6a
+
+# The engine ECU is on the DIAGNOSTIC bus (1), not the powertrain bus. Querying
+# bus 0 finds nothing at all and the car never fingerprints. Confirmed on this
+# car: openpilot's query goes out on bus 1 and 0x7e0 answers on 0x7e8 there.
+# The sweep below is deliberately a superset - both rx offsets, OBD multiplexing
+# on and off, and bus 0 as a last resort - because it is the combination that has
+# actually fingerprinted this car.
 FW_QUERY_CONFIG = FwQueryConfig(
-  requests=[
+  requests=[request for bus, obd_multiplexing in [(1, True), (1, False), (0, False)] for request in [
     Request(
       [GWM_VERSION_REQUEST],
       [GWM_VERSION_RESPONSE],
-      bus=0,
+      whitelist_ecus=[Ecu.engine],
+      rx_offset=GWM_RX_OFFSET,
+      bus=bus,
+      obd_multiplexing=obd_multiplexing,
     ),
-  ],
+    Request(
+      [GWM_VERSION_REQUEST],
+      [GWM_VERSION_RESPONSE],
+      whitelist_ecus=[Ecu.engine],
+      bus=bus,
+      obd_multiplexing=obd_multiplexing,
+    ),
+  ]],
 )
 
 DBC = CAR.create_dbc_map()
