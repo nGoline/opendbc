@@ -22,10 +22,15 @@ class CarInterface(CarInterfaceBase):
   def update(self, can_packets):
     # Grab the camera's raw STEER_CMD before parsing, so the controller can patch
     # that exact frame rather than compose one.
+    #
+    # Frames arrive as plain (address, dat, src) tuples - that is what
+    # can_capnp_to_list builds and what CANParser itself unpacks. Reading .address
+    # off them raises AttributeError on the first CAN packet and kills card, which
+    # shows up as canError plus processNotRunning rather than as anything car-shaped.
     for _, msgs in can_packets:
-      for msg in msgs:
-        if msg.address == STEER_CMD_ADDR and msg.src == self.cam_bus:
-          self.CS.stock_steer_cmd = bytes(msg.dat)
+      for addr, dat, src in msgs:
+        if addr == STEER_CMD_ADDR and src == self.cam_bus:
+          self.CS.stock_steer_cmd = bytes(dat)
     return super().update(can_packets)
 
   @staticmethod
