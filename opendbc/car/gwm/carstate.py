@@ -12,28 +12,18 @@ GEAR_MAP = {
   3: GearShifter.reverse,
 }
 
-# Message rates, measured off this car (route_c0 segment 40, 60 s). The CAN parser
-# marks a message invalid if it arrives slower than declared, so these have to be
-# right or the whole port reports a CAN fault and refuses to engage.
-MAIN_MESSAGES = [
-  ('STEER_ANGLE', 100),
-  ('GAS', 100),
-  ('WHEEL_SPEEDS', 50),
-  ('STEER_TORQUE', 50),
-  ('BRAKE', 50),
-  ('GEAR', 50),
-  ('LIGHTS', 20),
-  ('DOORS', 20),
-  ('SEATBELT', 2),
-]
-
-# Transmitted by the forward camera: only present on the camera bus once the
-# harness relay opens.
-CAM_MESSAGES = [
-  ('LATERAL_STATE', 20),
-  ('ACC', 10),
-]
-
+# Measured rates on this car, for reference (route_c0 seg 40, and unchanged across
+# three stationary captures): STEER_ANGLE 100, GAS 100, WHEEL_SPEEDS 50, STEER_TORQUE
+# 50, BRAKE 50, GEAR 50, LIGHTS 20, DOORS 20, SEATBELT 2 on the main bus;
+# LATERAL_STATE 20, ACC 10 on the camera bus.
+#
+# They are deliberately NOT declared to the parser. Declaring a frequency asserts it,
+# and an assertion that holds in one driving state can fail in another - the failure
+# mode is a permanent canError ("Unknown Vehicle Variant") with every message
+# physically present. Left unspecified, the parser learns each message's real rate
+# from the data and sets its own timeout from that, so it still catches a message
+# that stops, and bus_timeout still catches a dead bus. The panda rx checks in
+# safety/modes/gwm.h assert the rates that actually matter for safety.
 
 class CarState(CarStateBase):
   def __init__(self, CP):
@@ -106,6 +96,6 @@ class CarState(CarStateBase):
     can_base = CanBusBase(CP, None)
     dbc = DBC[CP.carFingerprint][Bus.pt]
     return {
-      Bus.pt: CANParser(dbc, MAIN_MESSAGES, can_base.offset),
-      Bus.cam: CANParser(dbc, CAM_MESSAGES, can_base.offset + 2),
+      Bus.pt: CANParser(dbc, [], can_base.offset),
+      Bus.cam: CANParser(dbc, [], can_base.offset + 2),
     }
