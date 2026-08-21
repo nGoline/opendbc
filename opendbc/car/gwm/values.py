@@ -23,10 +23,19 @@ class CarControllerParams:
     MAX_LATERAL_ACCEL=3.0,  # m/s^2 (~ISO 11270 comfort; OEM route_7a peaked 3.57, so we're already conservative)
     MAX_LATERAL_JERK=2.5,   # m/s^3 — conservative/smooth
     # Low-speed backstop (jerk limit governs at speed). Was 2.0°/20ms (=100°/s): crawl hunting in
-    # stop-and-go (route 00000008). 1.0 (=50°/s) softens wiggle; may rate-limit tight low-speed turns
-    # (parking/roundabout) — paired with steerActuatorDelay 0.20; if over-damped, raise rate first.
-    MAX_ANGLE_RATE=1.0,     # deg per 20ms frame (= 50 deg/s)
+    # stop-and-go (route 00000008). 1.0 (=50°/s) softens wiggle. Routes 70/72/73 (post that tune)
+    # still showed cmd reversals >> wheel at <40 kph — carcontroller applies an extra speed-scaled
+    # rate on top (see MK4_ANGLE_RATE_*); this constant is the high-speed ceiling.
+    MAX_ANGLE_RATE=1.0,     # deg per 20ms frame (= 50 deg/s); low-speed extra cap in carcontroller
   )
+
+  # MK4 extra angle-rate schedule (deg/20ms), applied after apply_steer_angle_limits_vm.
+  # Routes 70/72/73: rev_cmd 2–3× rev_wheel below 40 kph. Soften crawl without limiting highway.
+  MK4_ANGLE_RATE_LOW = 0.6       # <= MK4_ANGLE_RATE_V_LO
+  MK4_ANGLE_RATE_HIGH = 1.0      # >= MK4_ANGLE_RATE_V_HI (matches ANGLE_LIMITS.MAX_ANGLE_RATE)
+  MK4_ANGLE_RATE_V_LO = 25.0     # kph
+  MK4_ANGLE_RATE_V_HI = 45.0     # kph
+
 
   # MK4: clamp the commanded angle to within this many deg of the MEASURED wheel. The EPS under-executes
   # angle offsets (~0.76x), so when the wheel trails, the model winds the command far past it (rails to

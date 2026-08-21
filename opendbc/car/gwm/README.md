@@ -52,7 +52,7 @@ Distance:   wheel follow buttons → gapAdjustCruise → openpilot personality (
 ## Recent updates (2026-07)
 
 ### Lateral
-- `steerActuatorDelay` **0.15 → 0.20 s** (damp stop-and-go path noise).
+- `steerActuatorDelay` **0.15 → 0.20 → 0.28 s** + speed-scaled angle rate (0.6@≤25 → 1.0@≥45 kph) for low-speed hunt (routes 70/72/73).
 - `MAX_ANGLE_RATE` **2.0 → 1.0** °/20 ms (100 → **50 °/s** low-speed backstop).  
   - *Note:* Tesla uses **5.0** as comfort/fault backstop; **1.0 is more damped**. If tight low-speed turns feel soft, raise rate toward **1.5–2.0** *before* changing delay (isolate knobs).
 - `steerTempUnavailable` gated on real wheel divergence + EPS not obeying (not raw EPS fault bit).
@@ -97,8 +97,9 @@ Distance:   wheel follow buttons → gapAdjustCruise → openpilot personality (
 
 | Parameter | Value | Role |
 |-----------|--------|------|
-| `steerActuatorDelay` | 0.20 s | Planner lag estimate |
-| `MAX_ANGLE_RATE` | 1.0 °/20 ms | Low-speed angle rate cap |
+| `steerActuatorDelay` | 0.28 s | Planner lag estimate (was 0.20; hunt damp) |
+| `MAX_ANGLE_RATE` | 1.0 °/20 ms | High-speed ceiling |
+| `MK4_ANGLE_RATE_*` | 0.6→1.0 @ 25–45 kph | Extra low-speed rate after VM limits |
 | `MAX_LATERAL_ACCEL` | 3.0 m/s² | ISO-ish comfort |
 | `MAX_LATERAL_JERK` | 2.5 m/s³ | Smoothing |
 | `MK4_ANGLE_ERROR_MAX` | 4.0 ° | Cmd vs wheel windup limit |
@@ -118,7 +119,7 @@ Distance:   wheel follow buttons → gapAdjustCruise → openpilot personality (
 | **Engage without steering feel** | Understood | The “latActive False 14%” windows are all ~1 kph stops: standstill gate with `steerAtStandstill=False`. Expected behavior, not a defect. |
 | **OEM dual-beep on brake cancel** | Fixed (code) | Beep = 2 cluster transitions (`0x1a→0x0a→0x12`). Old demote never hit the wire (only patched while enabled). New: ~2 s post-cancel grace masks `0x0a`, lands 0x12 direct. Road-validate. |
 | **Engage set 105 kph** | Done (code) | Experimental mode used `V_CRUISE_INITIAL_EXPERIMENTAL_MODE=105` as floor; GWM now always uses vEgo/20. |
-| **Low-speed steer feel** | Medium | 8–15 km/h improved; crawl metrics noisy; re-check parking/roundabouts with rate 1.0. |
+| **Low-speed steer hunt** | In test | Delay 0.28 + rate 0.6→1.0 @25–45 kph (routes 70/72/73). Validate crawl + parking turns. |
 | **Highway / >60 km/h validation** | Medium | Limited urban-only routes so far (max ~50 km/h in analyzed drives). |
 | **Fingerprint without force env** | Low | Prefer pure CAN/FW ID after more routes. |
 | **Upstream / nGoline PR** | Low | Branch is ahead of nGoline; not merged to commaai. |

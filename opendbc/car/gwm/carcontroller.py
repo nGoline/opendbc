@@ -132,6 +132,18 @@ class CarController(CarControllerBase):
         apply_angle = apply_steer_angle_limits_vm(target_angle, self.apply_angle_last,
                                                   CS.out.vEgoRaw, CS.out.steeringAngleDeg, lat_active,
                                                   CarControllerParams, self.VM)
+        # MK4 low-speed hunt damp: VM jerk already softens with v^2, but routes 70/72/73 still had
+        # cmd reversals 2–3× the wheel below ~40 kph. Extra rate schedule on top of MAX_ANGLE_RATE.
+        if self.is_mk4 and lat_active:
+          v_kph = float(CS.out.vEgoRaw) * CV.MS_TO_KPH
+          max_rate = float(np.interp(
+            v_kph,
+            [CarControllerParams.MK4_ANGLE_RATE_V_LO, CarControllerParams.MK4_ANGLE_RATE_V_HI],
+            [CarControllerParams.MK4_ANGLE_RATE_LOW, CarControllerParams.MK4_ANGLE_RATE_HIGH],
+          ))
+          apply_angle = float(np.clip(apply_angle,
+                                      self.apply_angle_last - max_rate,
+                                      self.apply_angle_last + max_rate))
         # MK4: stop the command from winding far past the measured wheel during EPS under-execution
         # (see MK4_ANGLE_ERROR_MAX). When the EPS is not granting angle authority (A_RX != 1), use a
         # tighter band so we don't keep pushing opposite-signed commands into a non-tracking EPS.
