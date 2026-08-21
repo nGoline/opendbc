@@ -36,37 +36,6 @@ class CarControllerParams:
   # the road against a light hand.
   STEER_DRIVER_ALLOWANCE = 120
 
-  # EPS_LKAS_ANGLE_CFG (byte 22) is a steering EFFORT level, not a config constant.
-  # It reads as LKAS_EFFORT_BASE + percent, 0-100.
-  #
-  # This was originally recorded as a constant 0xe5 active / 0x81 passive, because
-  # every openpilot-engaged capture contained only the two values we send ourselves.
-  # The OEM ICC drive (route 000001ef) shows the camera ramping it: +4 per 50 Hz
-  # frame from 0x81 to 0xe5 over ~0.48 s on engagement, and back down over ~0.30 s
-  # on release, at every one of the 20 transitions across 7 labelled ICC runs.
-  # See haval-port captures/2026-08-21-steering-effort.md.
-  LKAS_EFFORT_BASE = 0x81
-  LKAS_EFFORT_MAX = 100
-  LKAS_EFFORT_UP = 4       # matches the camera's ramp in, 0->100 in ~0.5 s
-  LKAS_EFFORT_DOWN = 6     # matches the camera's ramp out, 100->0 in ~0.3 s
-
-  # Effort held while the driver is fighting the wheel. Zero means the EPS stops
-  # pushing entirely and the wheel goes light, which is the point.
-  #
-  # NOTE: zero effort with the enable bit still asserted is a state the OEM camera
-  # was never observed in - it ramps down through the low values and then clears
-  # the enable. If the EPS faults on it, raise this floor rather than reverting the
-  # wind-down.
-  LKAS_EFFORT_OVERRIDE = 0
-
-  # Driver torque that counts as fighting the wheel, with hysteresis so a hand
-  # resting near the threshold doesn't chatter the effort up and down. Sits above
-  # STEER_DRIVER_ALLOWANCE for the same reason Toyota's LTA allowance does: some
-  # resistance while changing lanes should not immediately cut authority.
-  # Measured on the first steered drive: p50 driver torque 33, override peaks 250+.
-  STEER_OVERRIDE_TORQUE = 150
-  STEER_OVERRIDE_RELEASE = 100
-
 
 # Wheel speed is encoded at 0.05924739 km/h per count in the DBC (the value the
 # working reference port settled on), so no extra scale factor is needed.
