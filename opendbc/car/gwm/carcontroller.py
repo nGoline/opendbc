@@ -1,3 +1,5 @@
+import numpy as np
+
 from opendbc.car import CanBusBase
 from opendbc.car.lateral import apply_std_steer_angle_limits
 from opendbc.car.interfaces import CarControllerBase
@@ -27,11 +29,23 @@ class CarController(CarControllerBase):
     can_sends = []
 
     if self.frame % CarControllerParams.STEER_STEP == 0:
+      # Clamp the command to within MAX_ANGLE_ERROR of the measured wheel angle
+      # BEFORE rate limiting, the way Ford does it. The EPS torque grows with
+      # commanded-minus-measured, so this is what bounds how hard it can fight the
+      # driver: push the wheel, it moves, the command follows, and no error - and
+      # therefore no resistance, and nothing to snap back to - can accumulate.
+      #
+      # The camera does exactly this; it never exceeded 4.6 deg of error in 2.6M
+      # measured frames. See CarControllerParams.MAX_ANGLE_ERROR.
+      desired_angle = float(np.clip(CC.actuators.steeringAngleDeg,
+                                    CS.out.steeringAngleDeg - CarControllerParams.MAX_ANGLE_ERROR,
+                                    CS.out.steeringAngleDeg + CarControllerParams.MAX_ANGLE_ERROR))
+
       # rate-limit the commanded angle to the car's own envelope. When lat is not
       # active this returns the measured wheel angle, which is what the panda
       # requires of an inactive angle command.
       apply_angle = apply_std_steer_angle_limits(
-        CC.actuators.steeringAngleDeg, self.apply_angle_last, CS.out.vEgoRaw,
+        desired_angle, self.apply_angle_last, CS.out.vEgoRaw,
         CS.out.steeringAngleDeg, CC.latActive, CarControllerParams.ANGLE_LIMITS,
       )
 

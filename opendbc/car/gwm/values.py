@@ -36,6 +36,29 @@ class CarControllerParams:
   # the road against a light hand.
   STEER_DRIVER_ALLOWANCE = 120
 
+  # Never command an angle more than this far from where the wheel actually is.
+  #
+  # This is what makes the wheel yield. The EPS servos to the commanded angle, and
+  # the torque it applies grows with the error, so bounding the error bounds how
+  # hard it can push back. Push the wheel, it moves, the command follows it, and
+  # the resistance never builds.
+  #
+  # MEASURED off the camera, which does exactly this. Across 2.6M frames where the
+  # OEM was commanding - ICC lane centering and ACC lane-departure nudges, several
+  # drives - |commanded - measured| never exceeded 4.6 deg, and the ceiling is flat
+  # across every driver-torque bucket, so it is a hard clamp and not a torque-
+  # dependent softening. Normal tracking sits at a median of 0.4 deg, so 4.0 leaves
+  # the controller all the room it needs and only bites when the driver is winning.
+  #
+  # openpilot without this clamp reached 22-28 deg of error against a resisting
+  # driver, which saturates the EPS. That is the whole of the "wheel is stiff and
+  # fights back" complaint. See haval-port captures/2026-08-21-steering-effort.md.
+  #
+  # Same mechanism Ford uses (apply_ford_curvature_limits clips to current
+  # curvature +- CURVATURE_ERROR) and the panda supports natively via
+  # enforce_angle_error / max_angle_error, which is the follow-up to this.
+  MAX_ANGLE_ERROR = 4.0
+
 
 # Wheel speed is encoded at 0.05924739 km/h per count in the DBC (the value the
 # working reference port settled on), so no extra scale factor is needed.
