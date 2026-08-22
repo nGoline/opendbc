@@ -26,10 +26,52 @@ class CarControllerParams:
   # wheel lags in a curve, raise the high-speed value; if it feels twitchy or
   # faults, lower it.
   ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(
-    300,                                    # max commanded angle, deg
-    ([0., 5., 25.], [1.0, 0.5, 0.15]),      # up:   deg/step vs m/s
-    ([0., 5., 25.], [1.5, 0.8, 0.25]),      # down: deg/step vs m/s
+    300,        # max commanded angle, deg
+    ([], []),   # v1 rate tables unused - the vehicle model supplies the limits
+    ([], []),
+
+    # Vehicle-model limits, as Tesla does. The hand-tuned v1 breakpoints allowed
+    # 7.5 deg/s at 25 m/s and were cutting into the request in up to 23% of
+    # engaged frames, which under-steers curves.
+    MAX_LATERAL_ACCEL=3.0,   # m/s^2, ~ISO 11270 comfort
+    MAX_LATERAL_JERK=2.5,    # m/s^3, conservative
+    MAX_ANGLE_RATE=2.0,      # deg per 20 ms frame (100 deg/s), low-speed backstop
   )
+
+  # Never let the TRANSMITTED angle sit more than this far from the measured wheel.
+  # Applied AFTER the rate limiter, which is the whole point: clamping the limiter's
+  # INPUT bounds nothing, because when the driver moves the wheel faster than the
+  # command may slew, the command cannot follow and the error runs away. Driven
+  # 2026-08-22 with the clamp on the input: 19.1% of frames exceeded it, to 88.5 deg.
+  MAX_ANGLE_ERROR = 4.0  # deg
+
+  # --- driver override -------------------------------------------------------
+  # openpilot STOPS COMMANDING when the driver takes the wheel, as Tesla does
+  # (lat_active = CC.latActive and hands_on_level < 3). The limiter then returns
+  # the measured angle, so the command sits exactly where the wheel is: no error,
+  # nothing to fight, nothing to snap back to.
+  #
+  # Measured on the camera across 34382 frames where it was commanding: driver
+  # torque p99 is 129 and p99.9 is 183, and the OEM stops commanding once the
+  # driver reaches roughly 176-272. So a gate at 150 sits above ordinary steering
+  # and below where the OEM itself gives up.
+  OVERRIDE_TORQUE = 150      # sustained |driver torque| that hands control back
+  OVERRIDE_FRAMES = 7        # ~70 ms at 100 Hz, so brief spikes do not trigger it
+
+  # Once handed back, STAY handed back for ~1 s before trying again. Without this
+  # the latch clears the instant torque dips and openpilot grabs the wheel back
+  # several times a second - which is the oscillation seen on 2026-08-22.
+  OVERRIDE_HOLD_FRAMES = 100
+
+  # A fast override ALWAYS disengages outright, the way Tesla treats its EPS high
+  # angle rate fault. Requires torque as well as rate so that a genuine fast curve
+  # cannot trigger it. The camera never exceeded 68 deg/s while commanding.
+  FAST_OVERRIDE_RATE = 100.0   # deg/s of measured wheel movement
+  FAST_OVERRIDE_TORQUE = 150   # and at least this much driver torque
+
+  # EPS_FAULT_PERMANENT toggles spuriously in normal operation, so it only counts
+  # as a fault once it has been continuously set for ~1 s.
+  EPS_FAULT_FRAMES = 100
 
   # Driver-torque threshold (raw units of STEER_TORQUE.DRIVER_TORQUE) above which
   # the driver is considered to be holding the wheel. Provisional - confirm on

@@ -25,6 +25,10 @@
 // units so the command and the measurement share one signed scale.
 #define GWM_STEER_ZERO 7796
 
+// Driver torque that disengages outright. The camera commands through a p99 of 129
+// and stops around 176-272, so this sits above anything seen while it was steering.
+#define GWM_DISENGAGE_TORQUE 300
+
 static void gwm_rx_hook(const CANPacket_t *msg) {
   if (msg->bus == GWM_MAIN_BUS) {
     if (msg->addr == GWM_STEER_ANGLE) {
@@ -43,6 +47,13 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
       // DRIVER_TORQUE: signed 11-bit, bit 78 len 11 big-endian
       int t = (int)(((msg->data[9] & 0x7FU) << 4) | (msg->data[10] >> 4));
       update_sample(&torque_driver, to_signed(t, 11));
+
+      // A firm grab disengages outright, on the rising edge. openpilot detects the
+      // fast-override case itself and reports it through steeringDisengage; this is
+      // the independent backstop, and it is why the threshold sits well above the
+      // 150 that merely hands lateral control back.
+      const int max_tq = SAFETY_MAX(SAFETY_ABS(torque_driver.min), SAFETY_ABS(torque_driver.max));
+      steering_disengage = max_tq > GWM_DISENGAGE_TORQUE;
     }
 
     if (msg->addr == GWM_GAS) {
@@ -70,14 +81,15 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
   static const AngleSteeringLimits GWM_STEERING_LIMITS = {
     .max_angle = 3000,          // 300 deg, in 0.1-deg CAN units
     .angle_deg_to_can = 10,
-    .angle_rate_up_lookup = {
-      {0., 5., 25.},
-      {2., 1., 0.3},
-    },
-    .angle_rate_down_lookup = {
-      {0., 5., 25.},
-      {3., 1.6, 0.5},
-    },
+    .frequency = 50U,
+  };
+
+  // Must match VehicleModel(CarInterface.get_non_essential_params(...)) on the
+  // openpilot side, or the two envelopes disagree.
+  static const AngleSteeringParams GWM_STEERING_PARAMS = {
+    .slip_factor = -0.000612593970148998,  // calc_slip_factor(VM)
+    .steer_ratio = 18.,
+    .wheelbase = 2.738,
   };
 
   if (msg->addr == GWM_STEER_CMD) {
@@ -85,7 +97,7 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
     int desired_angle = raw - GWM_STEER_ZERO;                               // centered, 0.1 deg
     bool lka_active = msg->data[21] == 0x3FU;                               // EPS_LKAS_ANGLE_ENABLE
 
-    if (steer_angle_cmd_checks(desired_angle, lka_active, GWM_STEERING_LIMITS)) {
+    if (steer_angle_cmd_checks_vm(desired_angle, lka_active, GWM_STEERING_LIMITS, GWM_STEERING_PARAMS)) {
       tx = false;
     }
   }

@@ -1,5 +1,5 @@
 from opendbc.can.parser import CANParser
-from opendbc.car import Bus, CanBusBase, structs
+from opendbc.car import DT_CTRL, Bus, CanBusBase, structs
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.gwm.values import DBC, CarControllerParams
 
@@ -32,6 +32,8 @@ class CarState(CarStateBase):
     # the controller can patch it. None until the camera is first heard.
     self.stock_steer_cmd = None
     self.eps_lka_active = False
+    self.eps_fault_frames = 0
+    self.last_angle = 0.0
 
   def update(self, can_parsers) -> structs.CarState:
     cp = can_parsers[Bus.pt]
@@ -57,10 +59,26 @@ class CarState(CarStateBase):
     ret.steeringTorqueEps = ret.steeringTorque
     ret.steeringPressed = self.update_steering_pressed(
       abs(ret.steeringTorque) > CarControllerParams.STEER_DRIVER_ALLOWANCE, 5)
-    # EPS_FAULT_PERMANENT cycles 0/1 during normal operation on this platform, so
-    # it is not a fault source. The panda safety mode is the real guard.
+    # EPS_FAULT_PERMANENT toggles 0/1 spuriously during normal operation on this
+    # platform, so a single frame means nothing. Debounced over ~1 s it is a real
+    # fault. steerFaultPermanent stays False - nothing observed warrants latching
+    # until the car is restarted.
+    self.eps_fault_frames = (self.eps_fault_frames + 1) if \
+      cp.vl['STEER_TORQUE']['EPS_FAULT_PERMANENT'] else 0
     ret.steerFaultPermanent = False
-    ret.steerFaultTemporary = False
+    ret.steerFaultTemporary = self.eps_fault_frames > CarControllerParams.EPS_FAULT_FRAMES
+
+    # A FAST override always disengages outright, the way Tesla treats its EPS high
+    # angle rate fault: `steeringDisengage` drops controls_allowed on the rising
+    # edge. Torque is required as well as rate so a genuine fast curve, where the
+    # wheel moves quickly with no hands on it, cannot trigger a disengage.
+    # STEERING_RATE's DBC factor is known wrong (reads ~60x low), so differentiate
+    # the angle instead. CarState.update runs once per 100 Hz control step.
+    rate_dps = (ret.steeringAngleDeg - self.last_angle) / DT_CTRL
+    self.last_angle = ret.steeringAngleDeg
+    ret.steeringDisengage = (abs(rate_dps) > CarControllerParams.FAST_OVERRIDE_RATE and
+                             abs(ret.steeringTorque) > CarControllerParams.FAST_OVERRIDE_TORQUE)
+
     self.eps_lka_active = cp_cam.vl['LATERAL_STATE']['LKAS_STATE'] == 5
 
     # gear
