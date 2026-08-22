@@ -1,10 +1,18 @@
 import numpy as np
 
 from opendbc.car import CanBusBase
-from opendbc.car.lateral import apply_std_steer_angle_limits
+from opendbc.car.lateral import apply_steer_angle_limits_vm
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.gwm.gwmcan import create_steer_command
 from opendbc.car.gwm.values import CarControllerParams
+from opendbc.car.vehicle_model import VehicleModel
+
+
+def get_safety_CP():
+  # Build the vehicle model from the platform's static params, not from the CP we
+  # were handed, so the limits here are identical to the ones the panda computes.
+  from opendbc.car.gwm.interface import CarInterface
+  return CarInterface.get_non_essential_params("GWM_HAVAL_H6_PHEV19_MK4")
 
 STEER_CMD_ADDR = 0x12b
 
@@ -25,6 +33,9 @@ class CarController(CarControllerBase):
     self.main_bus = CanBusBase(CP, None).offset
     self.apply_angle_last = 0.0
 
+    # Vehicle model used for lateral limiting, as Tesla does
+    self.VM = VehicleModel(get_safety_CP())
+
   def update(self, CC, CS, now_nanos):
     can_sends = []
 
@@ -41,12 +52,12 @@ class CarController(CarControllerBase):
                                     CS.out.steeringAngleDeg - CarControllerParams.MAX_ANGLE_ERROR,
                                     CS.out.steeringAngleDeg + CarControllerParams.MAX_ANGLE_ERROR))
 
-      # rate-limit the commanded angle to the car's own envelope. When lat is not
-      # active this returns the measured wheel angle, which is what the panda
-      # requires of an inactive angle command.
-      apply_angle = apply_std_steer_angle_limits(
+      # Rate-limit via the vehicle model - constant lateral accel and jerk across
+      # all speeds. When lat is not active this returns the measured wheel angle,
+      # which is what the panda requires of an inactive angle command.
+      apply_angle = apply_steer_angle_limits_vm(
         desired_angle, self.apply_angle_last, CS.out.vEgoRaw,
-        CS.out.steeringAngleDeg, CC.latActive, CarControllerParams.ANGLE_LIMITS,
+        CS.out.steeringAngleDeg, CC.latActive, CarControllerParams, self.VM,
       )
 
       # only transmit once we have heard the camera's frame to patch. Without it
