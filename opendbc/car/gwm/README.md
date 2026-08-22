@@ -59,7 +59,7 @@ Distance:   wheel follow buttons → gapAdjustCruise → openpilot personality (
 - `MK4_ANGLE_ERROR_MAX` / not-obeying clip to reduce command windup vs EPS lag.
 - Hands-on keepalive (spoofed torque on 0x147 → camera) to avoid OEM hands-off limp.
 - Debounced lateral override (`OVERRIDE_TORQUE` 100 / instant 150) separate from shared `steeringPressed`.
-- MK4 `steeringPressed` **hysteresis** ON **140** / OFF **100** (was flat 120) — less "take control" / steerOverride spam.
+- MK4 `steeringPressed` **hysteresis** ON **155** / OFF **120** (was 140/100) — hands-off EPS peaks still hit ~140 in curves (routes 70/72/73).
 - MK4 `cruiseState.available` = in **Drive** and not acc-faulted (not only after stalk). Brake no longer clears main_on (cancel only) — cuts wrongCarMode flood.
 
 ### Longitudinal / cruise (openpilot + opendbc)

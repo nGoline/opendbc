@@ -24,8 +24,11 @@ MK4_SCROLL_HOLD = MK4_CRUISE_LONG_PRESS + 4  # 54
 # route 00000016: eng+lat p90 |tq|~90, real grabs 122–257. Flat threshold 120 chattered at the
 # edge and flooded logs/UI when a hand rested near the limit. Enter pressed above 140; leave
 # below 100 (matches carcontroller OVERRIDE_TORQUE release band).
-MK4_STEER_PRESSED_ON = 140
-MK4_STEER_PRESSED_OFF = 100
+# Hands-off EPS reaction still reaches p99≈127–129 / max≈140 in curves (routes 70/72/73).
+# ON must sit above that band so EventName.steerOverride does not soft-disable mid-curve;
+# aligns with carcontroller OVERRIDE_TORQUE=130 (lat cmd) — pressed alert is the noisier path.
+MK4_STEER_PRESSED_ON = 155
+MK4_STEER_PRESSED_OFF = 120
 
 
 class CarState(CarStateBase):
@@ -151,9 +154,9 @@ class CarState(CarStateBase):
       ret.steeringTorqueEps = cp.vl["RX_STEER_RELATED"]["B_RX_EPS_TORQUE"]
     # Two independent lateral gates on MK4 (do not conflate):
     # (1) steeringPressed (here): shared car_specific EventName.steerOverride / OVERRIDE_LATERAL.
-    #     Hysteresis ON 140 / OFF 100 — flat 120 spammed "take control" and long steerOverride streaks
-    #     near the edge (route 00000016). MK3 stays a flat 50.
-    # (2) carcontroller OVERRIDE_TORQUE (100) + debounce: drops lat_active on a sustained grab for the
+    #     Hysteresis ON 155 / OFF 120 — was 140/100; hands-off peaks still hit ~140 (routes 70/72/73)
+    #     and kept firing steerOverride. MK3 stays a flat 50.
+    # (2) carcontroller OVERRIDE_TORQUE (130) + debounce: drops lat_active on a sustained grab for the
     #     angle command path. Tuned for fully hands-off driving (clean takeovers), not "rest a hand".
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
       tq = abs(ret.steeringTorque)
