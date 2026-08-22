@@ -150,7 +150,8 @@ class TestGwmSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
 
   def test_firm_grab_disengages(self):
     # a firm driver grab drops controls on the rising edge, independently of openpilot
-    for tq, should_disengage in ((100, False), (250, False), (350, True)):
+    # 150-400 hands lateral control back but must NOT disengage; only a hard grab does
+    for tq, should_disengage in ((100, False), (250, False), (400, False), (500, True)):
       self.safety.set_controls_allowed(True)
       for _ in range(6):
         self._rx(self._torque_driver_msg(tq))

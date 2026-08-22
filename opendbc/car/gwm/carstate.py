@@ -1,5 +1,5 @@
 from opendbc.can.parser import CANParser
-from opendbc.car import DT_CTRL, Bus, CanBusBase, structs
+from opendbc.car import Bus, CanBusBase, structs
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.gwm.values import DBC, CarControllerParams
 
@@ -33,7 +33,7 @@ class CarState(CarStateBase):
     self.stock_steer_cmd = None
     self.eps_lka_active = False
     self.eps_fault_frames = 0
-    self.last_angle = 0.0
+    self.disengage_frames = 0
 
   def update(self, can_parsers) -> structs.CarState:
     cp = can_parsers[Bus.pt]
@@ -68,16 +68,12 @@ class CarState(CarStateBase):
     ret.steerFaultPermanent = False
     ret.steerFaultTemporary = self.eps_fault_frames > CarControllerParams.EPS_FAULT_FRAMES
 
-    # A FAST override always disengages outright, the way Tesla treats its EPS high
-    # angle rate fault: `steeringDisengage` drops controls_allowed on the rising
-    # edge. Torque is required as well as rate so a genuine fast curve, where the
-    # wheel moves quickly with no hands on it, cannot trigger a disengage.
-    # STEERING_RATE's DBC factor is known wrong (reads ~60x low), so differentiate
-    # the angle instead. CarState.update runs once per 100 Hz control step.
-    rate_dps = (ret.steeringAngleDeg - self.last_angle) / DT_CTRL
-    self.last_angle = ret.steeringAngleDeg
-    ret.steeringDisengage = (abs(rate_dps) > CarControllerParams.FAST_OVERRIDE_RATE and
-                             abs(ret.steeringTorque) > CarControllerParams.FAST_OVERRIDE_TORQUE)
+    # A hard grab disengages outright: `steeringDisengage` drops controls_allowed on
+    # the rising edge. Debounced so a single spike cannot do it. Ordinary force to
+    # help a turn stays well under this and only hands lateral control back.
+    self.disengage_frames = (self.disengage_frames + 1) if \
+      abs(ret.steeringTorque) > CarControllerParams.DISENGAGE_TORQUE else 0
+    ret.steeringDisengage = self.disengage_frames >= CarControllerParams.DISENGAGE_FRAMES
 
     self.eps_lka_active = cp_cam.vl['LATERAL_STATE']['LKAS_STATE'] == 5
 

@@ -25,9 +25,12 @@
 // units so the command and the measurement share one signed scale.
 #define GWM_STEER_ZERO 7796
 
-// Driver torque that disengages outright. The camera commands through a p99 of 129
-// and stops around 176-272, so this sits above anything seen while it was steering.
-#define GWM_DISENGAGE_TORQUE 300
+// Driver torque that disengages outright, as an independent backstop to the same
+// rule in carstate. Set ABOVE the openpilot-side threshold of 400 so openpilot
+// disengages first and this only catches the case where it did not. Measured over
+// the 2026-08-22 drives, driver torque never exceeded 344 while openpilot was
+// steering, and 449 at any point.
+#define GWM_DISENGAGE_TORQUE 450
 
 static void gwm_rx_hook(const CANPacket_t *msg) {
   if (msg->bus == GWM_MAIN_BUS) {

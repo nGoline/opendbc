@@ -63,11 +63,21 @@ class CarControllerParams:
   # several times a second - which is the oscillation seen on 2026-08-22.
   OVERRIDE_HOLD_FRAMES = 100
 
-  # A fast override ALWAYS disengages outright, the way Tesla treats its EPS high
-  # angle rate fault. Requires torque as well as rate so that a genuine fast curve
-  # cannot trigger it. The camera never exceeded 68 deg/s while commanding.
-  FAST_OVERRIDE_RATE = 100.0   # deg/s of measured wheel movement
-  FAST_OVERRIDE_TORQUE = 150   # and at least this much driver torque
+  # A hard grab disengages outright. Two tiers: OVERRIDE_TORQUE hands lateral
+  # control back and stays engaged, this disengages.
+  #
+  # Torque, NOT wheel rate. A first attempt used rate > 100 deg/s and disengaged on
+  # ordinary turns, because that was calibrated against the CAMERA commanding
+  # hands-off (max 68 deg/s) rather than against a driver. Measured on the drives
+  # of 2026-08-22: while openpilot is steering the wheel rate reaches p99 64 and a
+  # max of 117 deg/s, but in manual driving it reaches p99 359 and a max of 3308.
+  # There is no rate threshold that separates "override" from "turning the wheel".
+  #
+  # Driver torque does separate them. While openpilot steers: p99 120, p99.9 242,
+  # max 344. 400 never fired across either drive, and leaves the 150-400 band to
+  # hand control back without disengaging - which is what forcing a turn should do.
+  DISENGAGE_TORQUE = 400
+  DISENGAGE_FRAMES = 5   # ~50 ms sustained, so a single spike cannot disengage
 
   # EPS_FAULT_PERMANENT toggles spuriously in normal operation, so it only counts
   # as a fault once it has been continuously set for ~1 s.
