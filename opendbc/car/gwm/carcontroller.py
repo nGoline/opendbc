@@ -1,6 +1,7 @@
 import numpy as np
 from opendbc.can.packer import CANPacker
 from opendbc.car import Bus, structs
+from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.lateral import apply_meas_steer_torque_limits, apply_steer_angle_limits_vm
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.vehicle_model import VehicleModel
@@ -26,33 +27,31 @@ MK4_HANDS_ON_TORQUE = 120      # floor (was 65): above the OEM hands-on recognit
 MK4_HANDS_ON_TORQUE_MAX = 170  # cap: strong hands-on, still below the driver's real hard grabs (125-214)
 MK4_HANDS_ON_ANGLE_GAIN = 8    # extra spoofed torque per deg of |apply_angle| (mimics MK3's dynamic scaling)
 
-# MK4 override thresholds. This driver NEVER rests a hand on the wheel (fully hands-off), so the old
-# resting-hand-flap concern that pushed these up doesn't apply here — and it was HURTING take-control: on the
-# highway limps (route 110) the driver's grabs to take over read 44-85 and even the real hard grabs 125-214
-# didn't reliably register because the gate sat at 120. Match MK3's threshold (MAX_USER_TORQUE=100) so a genuine
-# grab hands off cleanly, with a firm-grab instant release just above the OEM hands-on point (~102).
-# Debounce still tolerates brief spikes.
-OVERRIDE_TORQUE = 100          # sustained |driver torque| to hand off (was 120; = MK3 MAX_USER_TORQUE).
-OVERRIDE_INSTANT_TORQUE = 150  # firm deliberate grab -> release within one frame for a clean takeover (was 250)
-OVERRIDE_FRAMES = 7            # ~70 ms sustained @100 Hz before engaging override; tolerates brief spikes
-OVERRIDE_HOLD_FRAMES = 100     # once overridden, stay handed-off ~1.0 s before re-asserting, like the OEM LKAS.
-                               # The old latch re-asserted the instant torque dipped, so openpilot grabbed back
-                               # "several times a second". The OEM waits ~1 s before trying again; this hold matches that and stops the flapping.
+# MK4 carcontroller lat_active latch (NOT carstate.steeringPressed — that is the separate shared-code
+# steerOverride event at torque>120). This path drops latActive for STEER_CMD only. Tuned for fully
+# hands-off use. 100 sustained was the "soquinho" cause: the torque sensor reads EPS reaction torque
+# up to ~134 hands-off in light curves (routes 56/57/58: >100 for 8-23% of curve time), so the latch
+# false-tripped ~1x/36s engaged and released the wheel mid-curve for the 1 s hold. 100 Hz replay on
+# route 1f: 130/170 keeps every real grab (2/2) with ZERO hands-off trips (sustained hands-off never
+# exceeds 140; longest run >120 was 160 ms). Trade-off: a gentle grab below 130 sustained no longer
+# hands off (the old reason for 100) — accepted, it cost a soquinho every ~36 s.
+OVERRIDE_TORQUE = 130          # sustained |driver torque| to hand off; hands-off peaks (~134) are single frames, absorbed by debounce
+OVERRIDE_INSTANT_TORQUE = 170  # firm grab -> release within one frame
+OVERRIDE_FRAMES = 10           # ~100 ms @100 Hz
+# Hold lat off ~1 s after override (OEM-style) so OP does not re-grab every torque dip.
+OVERRIDE_HOLD_FRAMES = 100
 
 
-# MK4 regen-lead: every real braking demand recovers energy (regen state bit ON), not just deep braking. The old
-# code only enabled regen below accel<-0.5 (Low)/-0.3 (Normal), so mild / hold-speed braking (incl. gentle
-# downhills) was pure friction with the powertrain still in the gas/drive state -- wasting energy and burning pads
-# (verified on the 8h30 drive: 49% of friction frames had regen OFF, readback msg283.b22 ~9 = 0%, while manual
-# driving held b22 ~230 on the same descents). The regen state bit now follows the brake request directly: any
-# accel<0 regenerates. Regen MAGNITUDE stays the powertrain's call (driver Low/Normal/Heavy selector, msg 726).
+# MK4 regen-lead: BRAKE_GAS_STATE (regen enable) uses a light accel hysteresis so cruise chatter around
+# 0 m/s^2 does not flip regen↔coast every frame (drive e6 jerk). BRAKE_OR_GAS_REQ / BRAKE_CMD still
+# follow sign(accel) every frame — do NOT hold brake mode or pin GAS_CMD=0 across a deadband: that
+# FAULTED the OEM ACC (drives 13e-146, "Cruise Fault: Restart the Car"). Regen MAGNITUDE stays the
+# powertrain's call (driver Low/Normal/Heavy on the stalk selector); we only gate the enable state.
 #
-# CAUTION (drives 13e-146, 2026-07-16): an earlier version also pinned GAS_CMD=-192 (raw 0) and held brake mode
-# through a lift-off deadband/hysteresis. That FAULTED the OEM ACC ECU ("Cruise Fault: Restart the Car" / TAKE
-# CONTROL red screen -- accFaulted = ACC.CRUISE_STATE_2==0): under pcmCruise=False the dormant OEM ACC never sees
-# GAS_CMD raw 0, nor a sustained brake request (req=13) held at the -41 brake-off baseline, so it rejected the
-# frame. Those are reverted. Keep the frame otherwise byte-identical to the known-good 8h30 build. Lift-off-level
-# regen (one-pedal feel) + gas/brake anti-dither are deferred until this base regen is confirmed fault-free.
+# Enter regen when accel <= REGEN_ON; leave when accel >= REGEN_OFF or long inactive. Band is small
+# (~0.13 m/s^2) — enough for planner noise, not a deep coast-hold.
+MK4_REGEN_ON_MS2 = -0.08
+MK4_REGEN_OFF_MS2 = 0.05
 
 
 class CarController(CarControllerBase):
@@ -69,7 +68,13 @@ class CarController(CarControllerBase):
     self.override_active = False   # MK4: debounced driver-override latch
     self.override_counter = 0
     self.override_hold = 0         # MK4: frames remaining in the post-override OEM-style hold-off
-    self.regen_brake = False       # MK4: hysteretic braking/regen latch (regen-lead: braking == regen state)
+    self.regen_brake = False       # MK4: hysteretic REGEN state latch (BRAKE_GAS_STATE only; see MK4_REGEN_*)
+    # OEM cluster (0x2AB): latch last good set-speed + follow dashes so the Vmax icon stays solid
+    # while engaged (OEM: icon always on when ACC active). Avoid thrashing distance every frame.
+    self.acc_cluster_set_kph: float | None = None
+    self.acc_cluster_follow: int | None = None
+    self.enabled_prev = False        # MK4: falling-edge detect for the quiet-cancel grace
+    self.cancel_demote_frames = 0    # MK4: frames left masking the camera's 0x0a standby step post-cancel
 
   def update(self, CC, CS, now_nanos):
     can_sends = []
@@ -93,6 +98,17 @@ class CarController(CarControllerBase):
         self.override_active = True
         self.override_hold = OVERRIDE_HOLD_FRAMES
       lat_active = CC.latActive and not self.override_active
+
+      # Quiet-cancel grace: on disengage, hold ~2 s masking the camera's 0x1a->0x0a standby step
+      # on the 0x2AB re-TX (see create_acc_cluster_mk4) so the cluster sees one state transition,
+      # not the dual-beep pair. Re-engage clears it immediately.
+      if CC.enabled:
+        self.cancel_demote_frames = 0
+      elif self.enabled_prev:
+        self.cancel_demote_frames = 200  # ~2 s @100 Hz
+      else:
+        self.cancel_demote_frames = max(0, self.cancel_demote_frames - 1)
+      self.enabled_prev = CC.enabled
     else:
       lat_active = CC.latActive and abs(CS.out.steeringTorque) < MAX_USER_TORQUE
 
@@ -116,12 +132,29 @@ class CarController(CarControllerBase):
         apply_angle = apply_steer_angle_limits_vm(target_angle, self.apply_angle_last,
                                                   CS.out.vEgoRaw, CS.out.steeringAngleDeg, lat_active,
                                                   CarControllerParams, self.VM)
-        # MK4: stop the command from winding far past the measured wheel during EPS under-execution
-        # (see MK4_ANGLE_ERROR_MAX). MK3 (torque path) is unaffected.
-        if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4 and lat_active:
+        # MK4 low-speed hunt damp: VM jerk already softens with v^2, but routes 70/72/73 still had
+        # cmd reversals 2–3× the wheel below ~40 kph. Extra rate schedule on top of MAX_ANGLE_RATE.
+        if self.is_mk4 and lat_active:
+          v_kph = float(CS.out.vEgoRaw) * CV.MS_TO_KPH
+          max_rate = float(np.interp(
+            v_kph,
+            [CarControllerParams.MK4_ANGLE_RATE_V_LO, CarControllerParams.MK4_ANGLE_RATE_V_HI],
+            [CarControllerParams.MK4_ANGLE_RATE_LOW, CarControllerParams.MK4_ANGLE_RATE_HIGH],
+          ))
           apply_angle = float(np.clip(apply_angle,
-                                      CS.out.steeringAngleDeg - CarControllerParams.MK4_ANGLE_ERROR_MAX,
-                                      CS.out.steeringAngleDeg + CarControllerParams.MK4_ANGLE_ERROR_MAX))
+                                      self.apply_angle_last - max_rate,
+                                      self.apply_angle_last + max_rate))
+        # MK4: stop the command from winding far past the measured wheel during EPS under-execution
+        # (see MK4_ANGLE_ERROR_MAX). When the EPS is not granting angle authority (A_RX != 1), use a
+        # tighter band so we don't keep pushing opposite-signed commands into a non-tracking EPS.
+        # MK3 (torque path) is unaffected.
+        if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4 and lat_active:
+          eps_obeying = int(CS.eps_stock_values.get("A_RX_STEER_REQUESTED", 1)) == 1
+          err_max = (CarControllerParams.MK4_ANGLE_ERROR_MAX if eps_obeying
+                     else CarControllerParams.MK4_ANGLE_ERROR_MAX_NOT_OBEYING)
+          apply_angle = float(np.clip(apply_angle,
+                                      CS.out.steeringAngleDeg - err_max,
+                                      CS.out.steeringAngleDeg + err_max))
         can_sends.append(gwmcan.create_steer_command_angle(
           self.packer,
           self.CAN,
@@ -131,16 +164,18 @@ class CarController(CarControllerBase):
         ))
         self.apply_angle_last = apply_angle
 
-        # MK4 hands-on keepalive: re-transmit the EPS 0x147 frame to the camera with a spoofed hands-on torque
-        # (see MK4_HANDS_ON_TORQUE) so the ADAS never enters its hands-off warning/safe-stop escalation and the
-        # EPS doesn't limp mid-drive. Follow the commanded steer direction; let a real driver grab pass through.
-        # Only while engaged (relay closed): when disengaged the stock 0x147 reaches the camera directly, so a
-        # spoofed copy would double it. gate on CC.enabled.
-        if CC.enabled and CS.eps_stock_raw is not None:
-          mag = min(MK4_HANDS_ON_TORQUE_MAX, MK4_HANDS_ON_TORQUE + MK4_HANDS_ON_ANGLE_GAIN * abs(apply_angle))
-          spoof_torque = int(mag if apply_angle >= 0 else -mag)
-          if abs(CS.out.steeringTorque) > mag:  # real grab is stronger -> forward the true torque/direction
-            spoof_torque = int(CS.out.steeringTorque)
+        # MK4 hands-on keepalive: re-transmit the EPS 0x147 frame to the camera. The panda never forwards the
+        # stock 0x147 main->camera while this safety mode is active (TX config has .check_relay=true), so we are
+        # the camera's ONLY source of EPS feedback whenever onroad -- engaged OR not. Send every frame like the
+        # MK3 create_wheel_touch does; while engaged patch in a dynamic hands-on torque (floor/cap/angle-gain
+        # from highway limp analysis) so the ADAS never runs its hands-off warning/safe-stop escalation, and
+        # let a real driver grab pass through. Disengaged, the real torque is re-encoded unchanged.
+        if CS.eps_stock_raw is not None:
+          spoof_torque = int(CS.out.steeringTorque)
+          if CC.enabled:
+            mag = min(MK4_HANDS_ON_TORQUE_MAX, MK4_HANDS_ON_TORQUE + MK4_HANDS_ON_ANGLE_GAIN * abs(apply_angle))
+            if abs(spoof_torque) <= mag:
+              spoof_torque = int(mag if apply_angle >= 0 else -mag)
           can_sends.append(gwmcan.create_wheel_touch_mk4(self.CAN, CS.eps_stock_raw, spoof_torque))
       else:
         new_torque = int(round(actuators.torque * self.params.STEER_MAX))
@@ -177,11 +212,16 @@ class CarController(CarControllerBase):
           accel = - abs(self.accel / CarControllerParams.ACCEL_MIN)
         else:
           accel = self.accel / CarControllerParams.ACCEL_MAX
-        # MK4 regen-lead (see note above): every real brake regenerates (regen state == braking). Frame otherwise
-        # byte-identical to the known-good build -- braking is the plain sign of accel, no held-coast, no GAS floor.
+        # braking (BRAKE_OR_GAS_REQ / cmds): plain sign of accel every frame.
+        # regen_brake (BRAKE_GAS_STATE only): light hysteresis — see MK4_REGEN_* above.
         braking = self.accel < 0
         if self.is_mk4:
-          self.regen_brake = CC.longActive and braking
+          if not CC.longActive:
+            self.regen_brake = False
+          elif self.accel <= MK4_REGEN_ON_MS2:
+            self.regen_brake = True
+          elif self.accel >= MK4_REGEN_OFF_MS2:
+            self.regen_brake = False
         can_sends.append(gwmcan.create_longitudinal_command(
           self.packer,
           self.CAN,
@@ -192,9 +232,10 @@ class CarController(CarControllerBase):
           is_mk4=self.is_mk4,
           regen=self.regen_brake,
           braking=braking,
+          longitudinal_stock_raw=CS.acc_cmd_stock_raw if self.is_mk4 else None,
         ))
 
-    if self.frame % 5 == 0: # 20 Hz
+    if self.frame % 5 == 0:  # 20 Hz
       # HUD updates
       can_sends.append(gwmcan.create_hud_command(
         self.packer,
@@ -202,7 +243,49 @@ class CarController(CarControllerBase):
         hud_stock_values=CS.hud_stock_values,
         steer_required=CC.latActive,
         is_mk4=self.is_mk4,
+        hud_stock_raw=CS.hud_stock_raw if self.is_mk4 else None,
       ))
+
+    # MK4 OP_CRUISE: re-TX camera ACC (0x2AB) onto main with openpilot set speed so the Haval
+    # cluster tracks VCruiseHelper. Match OEM camera rate (~10 Hz; panda RX check 10U).
+    # Always re-TX while we hold the relay slot. While engaged: keep set-speed + CRUISE activated
+    # latched (OEM keeps the Vmax icon solid whenever ACC is on — intermittent chrome was from
+    # frozen camera state + thrashing distance on every personality tick).
+    if self.frame % 10 == 0:  # 10 Hz
+      if self.is_mk4 and self.CP.openpilotLongitudinalControl and CS.acc_stock_raw is not None:
+        hud = CC.hudControl
+        set_kph = None
+        follow = None
+        cruise_active = bool(CC.enabled)
+        if CC.enabled:
+          raw = float(hud.setSpeed) * CV.MS_TO_KPH if hud.speedVisible else 0.0
+          if 0.0 < raw < 200.0:
+            self.acc_cluster_set_kph = raw
+          # Hold last good set while engaged even if one frame publishes 255/unset
+          set_kph = self.acc_cluster_set_kph
+          if set_kph is None and CS.out.vEgo > 0.5:
+            # First-engage race before VCruiseHelper init: show vEgo floor 20 like cruise.py
+            set_kph = float(np.clip(CS.out.vEgo * CV.MS_TO_KPH, 20.0, 145.0))
+            self.acc_cluster_set_kph = set_kph
+          # Follow dashes: map personality 1..3 -> OEM 1..4; only update latch on change.
+          # Default to 3 if HUD has not published bars yet — OEM dist 0 = "disabled" (no ICC icon).
+          if hud.leadDistanceBars > 0:
+            new_follow = 4 if hud.leadDistanceBars >= 3 else int(hud.leadDistanceBars)
+            if self.acc_cluster_follow is None or new_follow != self.acc_cluster_follow:
+              self.acc_cluster_follow = new_follow
+          if self.acc_cluster_follow is None:
+            self.acc_cluster_follow = 3
+          follow = self.acc_cluster_follow
+        else:
+          self.acc_cluster_set_kph = None
+          self.acc_cluster_follow = None
+        can_sends.append(gwmcan.create_acc_cluster_mk4(
+          self.CAN, CS.acc_stock_raw,
+          set_speed_kph=set_kph,
+          follow_dashes=follow,
+          cruise_active=cruise_active,
+          cancel_demote=self.cancel_demote_frames > 0,
+        ))
 
     new_actuators = actuators.as_builder()
     if self.CP.steerControlType == SteerControlType.angle:

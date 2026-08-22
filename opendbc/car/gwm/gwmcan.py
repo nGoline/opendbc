@@ -93,16 +93,13 @@ def create_steer_command(packer, CAN: CanBus, camera_stock_values, steer: float,
   return packer.make_can_msg("STEER_CMD", CAN.main, values)
 
 
-def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, active, standstill, is_mk4: bool, regen: bool = False, braking: bool | None = None):
-  values = {s: longitudinal_stock_values[s] for s in [
-    "BRAKE_GAS_STATE_2",
-    "SPEED_REAL",
-    "COUNTER_BRAKE",
-    "BYPASSME_2",
-    "BYPASS_ACC1",
-    "BRAKE_GAS_STATE",
-    "COUNTER_ACC",
-  ]}
+def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, active, standstill, is_mk4: bool, regen: bool = False, braking: bool | None = None, longitudinal_stock_raw: bytes | None = None):
+  # the powertrain brake-vs-gas state fields were renamed in the MK4 DBC; the MK3 DBC still calls
+  # them BYPASSME_1 / BYPASS_ACC2 — reading the MK4 names unconditionally raised KeyError on MK3
+  # (same crash class create_buttons_command already guards against, in the other direction)
+  passthrough = ["SPEED_REAL", "COUNTER_BRAKE", "BYPASSME_2", "BYPASS_ACC1", "COUNTER_ACC"]
+  passthrough += ["BRAKE_GAS_STATE_2", "BRAKE_GAS_STATE"] if is_mk4 else ["BYPASSME_1", "BYPASS_ACC2"]
+  values = {s: longitudinal_stock_values[s] for s in passthrough}
 
   # `braking` is the gas<->brake decision. MK4 computes it in carcontroller with a lift-off threshold + hysteresis
   # (regen-lead); MK3 and any legacy caller falls back to the raw sign of accel (unchanged behavior).
@@ -143,8 +140,8 @@ def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, a
     # route_c0/route_55 -> brake = 0 / 131068 (regen on), gas/coast = 524288 / 131070. standstill lives in
     # BYPASS_ACC1 (untouched). CRC-safe: BRAKE_GAS_STATE_2 in CRC_BRAKE_0xEF(data[9:16]), BRAKE_GAS_STATE in
     # CRC_ACC_0x87(data[25:32]); both recomputed below.
-    # `regen` is gated by carcontroller's hysteresis (real braking only) so the bit does NOT flip on the
-    # planner's near-zero cruise accel -> avoids the regen pulsing that made longitudinal jerky (drive e6).
+    # `regen` is carcontroller's light accel hysteresis (MK4_REGEN_ON/OFF) so BRAKE_GAS_STATE does not
+    # chatter on planner near-zero cruise accel (drive e6). Independent of BRAKE_OR_GAS_REQ sign(accel).
     if active:
       if regen:
         values["BRAKE_GAS_STATE"] = 0
@@ -182,6 +179,20 @@ def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, a
   data = packer.make_can_msg("ACC_CMD", 0, values)[1]
   values["CRC_BRAKE_0xEF"] = checksum(data[9:16], 0xEF)
   values["CRC_ACC_0x87"] = checksum(data[25:32], 0x87)
+
+  packed = packer.make_can_msg("ACC_CMD", 0, values)[1]
+  # MK4: DBC only models ~bytes 8-31. Packer zeros 0-7 and 32-63 — route 00000020 eng showed
+  # those camera bytes live (session/chrome). Keep the stock shell and overlay control block.
+  if is_mk4 and longitudinal_stock_raw is not None and len(longitudinal_stock_raw) >= 64 and len(packed) >= 32:
+    out = bytearray(longitudinal_stock_raw)
+    out[8:32] = packed[8:32]
+    # b16-23 is the opaque BYPASSME_2 block (own CRC@16 + counter@23, like every GWM 64-byte
+    # frame). Passing it through the parser as a 64-bit signal loses the low 11 bits to float64,
+    # so the packed b23 counter is DEAD 0x00 (route 57: 4137/4137 engaged frames, camera cycling)
+    # and receivers drop the frame — suspected Vmax/ICC icon killer. Our control fields don't
+    # live there (b9-15 + b24-31, each with its own CRC), so keep the camera's live block.
+    out[16:24] = longitudinal_stock_raw[16:24]
+    return 0x143, bytes(out), CAN.main
 
   return packer.make_can_msg("ACC_CMD", CAN.main, values)
 
@@ -261,7 +272,17 @@ def create_buttons_command(packer, CAN: CanBus, counter, stock_msg, cancel_comma
   return packer.make_can_msg('STEER_AND_AP_STALK', CAN.camera, values)
 
 
-def create_hud_command(packer, CAN: CanBus, hud_stock_values, steer_required, is_mk4: bool):
+def create_hud_command(packer, CAN: CanBus, hud_stock_values, steer_required, is_mk4: bool, hud_stock_raw: bytes | None = None):
+  # MK4: packer rebuild of LATERAL_STATE zeros most of the 64-byte camera frame (route 00000020:
+  # bytes 8/15/16/17/23/… always differ). Cluster chrome likely needs that shell. Patch LKAS only.
+  if is_mk4 and hud_stock_raw is not None and len(hud_stock_raw) >= 24:
+    b = bytearray(hud_stock_raw)
+    if steer_required:
+      # LKAS_STATE=5 packs as bits 3-5 of byte17 (0x28); keep other chrome bits from camera.
+      b[17] = (b[17] & ~0x38) | 0x28
+    b[16] = checksum(bytes(b[17:24]), 0x66)
+    return 0x23D, bytes(b), CAN.main
+
   values = {s: hud_stock_values[s] for s in [
     "BYPASSME_1",
     "BYPASSME_2",
@@ -287,6 +308,58 @@ def create_hud_command(packer, CAN: CanBus, hud_stock_values, steer_required, is
   values["CRC_X66"] = checksum(data[17:24], 0x66)
 
   return packer.make_can_msg("LATERAL_STATE", CAN.main, values)
+
+
+def create_acc_cluster_mk4(CAN: CanBus, acc_stock_raw: bytes, set_speed_kph: float | None = None,
+                          follow_dashes: int | None = None, cruise_active: bool = False,
+                          cancel_demote: bool = False):
+  """Re-TX camera ACC (0x2AB) onto the main bus with openpilot's set speed for the OEM cluster.
+
+  Under OP_CRUISE the stock camera freezes ACC_SPEED_SELECTION, so the Haval dash never tracks
+  openpilot's VCruiseHelper. We block the camera's 0x2AB from being forwarded (panda check_relay)
+  and re-transmit the latest camera frame with:
+    byte22 = ACC_SPEED_SELECTION (kph, factor 1)
+    byte21 low 3 bits = CAR_DISTANCE_SELECTION (1..4 follow dashes; 0 = disabled / no ICC)
+    byte18 CRUISE_STATE_2 + chrome bits when cruise_active
+    byte16 = CRC1 = crc8(bytes[17:24], xor=0x40)  — verified 600/600 frames, route 00000008
+
+  OEM cluster Vmax + ICC chrome (acc_probe / route 0a, 500+ stock activated frames):
+    b18 is always 0x1a when activated (state=3 at bits 3-5 plus constant 0x02), never packer's
+    bare 0x18. Only forcing CRUISE_STATE_2 left intermittent/missing icons when the camera
+    freeze dropped 0x02 or distance went to 0 ("disabled").
+    b21 always has bit5 (0x20) set on stock ACC-UI frames (0x21/0x61/…); low 3 bits = dashes.
+    b17 often has 0x80 while activated — set it when engaged so Vmax chrome stays lit.
+
+  When set_speed_kph is None the speed field is left as in the camera frame (still re-TX for
+  the relay slot). Follow-dashes None leaves the stock distance field untouched unless
+  cruise_active requires a non-zero dash for ICC.
+  """
+  b = bytearray(acc_stock_raw)
+  if set_speed_kph is not None:
+    b[22] = int(round(float(np.clip(set_speed_kph, 0.0, 255.0)))) & 0xFF
+  if follow_dashes is not None:
+    dashes = int(np.clip(follow_dashes, 1, 4))  # 0 = OEM "disabled" (hides ICC)
+    b[21] = (b[21] & ~0x07) | (dashes & 0x07)
+  if cruise_active:
+    # Exact stock activated pattern (not only state nibble): 0x1a on every eng frame in logs.
+    b[18] = (b[18] & ~0x3F) | 0x1A
+    # ICC / follow UI: never leave dashes at 0; keep stock 0x20 chrome bit.
+    dist = b[21] & 0x07
+    if dist == 0:
+      dist = 1
+    b[21] = (b[21] & ~0x07) | dist | 0x20
+    # Vmax chrome assist (common on stock activated frames)
+    b[17] = b[17] | 0x80
+  elif cancel_demote:
+    # Quiet-cancel grace (~2 s after disengage): the camera steps 0x1a -> 0x0a (~0.1 s) -> 0x12
+    # (~1.7 s) and the cluster dual-beeps — one beep per transition (routes 1f/20, identical with
+    # or without blinker). Overwrite the standby step and land directly on the camera's final
+    # state 2 so the cluster sees a single activated->0x12 transition. The reverted soft demote
+    # (52bcb3fc) never reached the wire: it only patched while CC.enabled, which had already
+    # dropped at cancel time.
+    b[18] = (b[18] & ~0x3F) | 0x12
+  b[16] = checksum(bytes(b[17:24]), 0x40)
+  return 0x2AB, bytes(b), CAN.main
 
 
 def checksum(data, xor_output):

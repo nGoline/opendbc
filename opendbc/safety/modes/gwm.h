@@ -22,6 +22,9 @@
 // (GWM_GEAR_STALK) instead of the FURTHER_DOWN-only msg 161 bit47. Set in gwm_init from the safety param.
 static bool gwm_op_cruise = false;
 static bool gear_stalk_down_prev = false;
+// MK4 steers by angle (FLAG_GWM_ANGLE_CONTROL): STEER_CMD carries a 14-bit angle at bytes 17-18
+// instead of the MK3 10-bit torque at bytes 12-13. Set in gwm_init from the safety param.
+static bool gwm_angle_control = false;
 
 static uint8_t gwm_get_counter(const CANPacket_t *msg) {
   uint8_t cnt = 0;
@@ -32,40 +35,47 @@ static uint8_t gwm_get_counter(const CANPacket_t *msg) {
   return cnt;
 }
 
+// 64-byte messages carry an independent CRC8 (poly 0x1D) per 8-byte block. GWM_RX_STEER_RELATED and
+// GWM_GAS validate block B (bytes 8-15), where the EPS torque / gas signals used below live.
 static uint32_t gwm_get_checksum(const CANPacket_t *msg) {
   uint8_t chksum = 0;
   if ((msg->addr == GWM_SPEED) || (msg->addr == GWM_ADAS_ACTIVATION)) {
     chksum = msg->data[0] & 0xFFU;
+  } else if ((msg->addr == GWM_RX_STEER_RELATED) || (msg->addr == GWM_GAS)) {
+    chksum = msg->data[8] & 0xFFU;
   } else {
   }
   return chksum;
 }
 
+static uint8_t gwm_crc8_lut_1d[256];  // poly 0x1D (MSB-first), generated in gwm_init
+
 static uint32_t gwm_compute_checksum(const CANPacket_t *msg) {
-  uint8_t chksum = 0;
   uint8_t crc = 0x00;
-  const uint8_t poly = 0x1D;
   uint8_t xor_out = 0x00;
-  int len = 8;
-  for (int i = 1; i < len; i++) {
-    uint8_t byte = msg->data[i];
-    crc ^= byte;
-    for (int bit = 0; bit < 8; bit++) {
-      if ((crc & 0x80U) != 0U) {
-        crc = (crc << 1) ^ poly;
-      } else {
-        crc <<= 1;
-      }
-      crc &= 0xFFU;
-    }
-  }
+  int start = 1;
+
+  // xor_out constants derived from logged frames (routes 075b.../00000163 MK3, 04219e.../000000c3 MK4);
+  // 0x61 and 0x95 are constant across both platforms
   if (msg->addr == GWM_ADAS_ACTIVATION) {
     xor_out = 0x2DU;
   } else if (msg->addr == GWM_SPEED) {
     xor_out = 0x7FU;
+  } else if (msg->addr == GWM_RX_STEER_RELATED) {
+    // block B: CRC at byte 8 covers bytes 9-15
+    xor_out = 0x61U;
+    start = 9;
+  } else if (msg->addr == GWM_GAS) {
+    // block B: CRC at byte 8 covers bytes 9-15 (GAS_POSITION)
+    xor_out = 0x95U;
+    start = 9;
   } else {
   }
-  chksum = crc ^ xor_out;
+
+  for (int i = start; i < (start + 7); i++) {
+    crc = gwm_crc8_lut_1d[crc ^ msg->data[i]];
+  }
+  uint8_t chksum = crc ^ xor_out;
   return chksum;
 }
 
@@ -102,6 +112,17 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
 
     // state machine to enter and exit controls for button enabling
     if (msg->addr == GWM_ADAS_ACTIVATION) {
+      if (gwm_angle_control) {
+        // STEERING_ANGLE (13|13@0+, 0.1 deg) is an unsigned magnitude; STEERING_DIRECTION (bit 16) gives the side.
+        // Stored in 0.1 deg units to match the STEER_CMD angle command scale.
+        uint32_t angle_raw = (((uint32_t)msg->data[1] & 0x3FU) << 7) | ((uint32_t)msg->data[2] >> 1);
+        int angle_meas_new = (int)angle_raw;
+        if ((msg->data[2] & 0x01U) != 0U) {
+          angle_meas_new = -angle_meas_new;
+        }
+        update_sample(&angle_meas, angle_meas_new);
+      }
+
       bool cruise_button = GET_BIT(msg, 47U);
       // enter controls on the rising edge of the FURTHER_DOWN stalk gesture (MK3 / non-op-cruise only;
       // MK4 op-cruise arms off the gentle-DOWN gesture on GWM_GEAR_STALK below)
@@ -147,15 +168,38 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
     .max_brake = 107,
   };
 
+  const AngleSteeringLimits GWM_ANGLE_STEERING_LIMITS = {
+    .max_angle = 3600,  // 360 deg, matches CarControllerParams.ANGLE_LIMITS.STEER_ANGLE_MAX
+    .angle_deg_to_can = 10,
+    .frequency = 50U,
+  };
+
+  // NOTE: based off GWM_HAVAL_H6_MK4 CarSpecs to match openpilot
+  const AngleSteeringParams GWM_ANGLE_STEERING_PARAMS = {
+    .slip_factor = -0.00061259397,  // calc_slip_factor(VM)
+    .steer_ratio = 18.0,
+    .wheelbase = 2.738,
+  };
+
   bool tx = true;
   bool violation = false;
 
   if (msg->bus == GWM_MAIN_BUS) {
     if (msg->addr == GWM_STEER_CMD) {
-      int desired_torque = (((msg->data[12] & 0x7FU) << 3) | ((msg->data[13] & 0xE0U) >> 5));
-      desired_torque = to_signed(desired_torque, 10) + 1;
-      bool steer_req = GET_BIT(msg, 125U);
-      violation |= steer_torque_cmd_checks(desired_torque, steer_req, GWM_TORQUE_STEERING_LIMITS);
+      if (gwm_angle_control) {
+        // MK4: 14-bit angle command (STEER_REQUEST 143|14@0+, factor 0.1, offset -779.6 deg).
+        // Kept in 0.1 deg units; -7796 recenters the DBC offset so 0 = straight ahead.
+        uint32_t desired_angle_raw = (((uint32_t)msg->data[17] << 6) | ((uint32_t)msg->data[18] >> 2)) & 0x3FFFU;
+        int desired_angle = (int)desired_angle_raw - 7796;
+        // EPS_LKAS_ANGLE_ENABLE (byte 21): 0x3F commands the EPS to execute the angle
+        bool steer_control_enabled = msg->data[21] == 0x3FU;
+        violation |= steer_angle_cmd_checks_vm(desired_angle, steer_control_enabled, GWM_ANGLE_STEERING_LIMITS, GWM_ANGLE_STEERING_PARAMS);
+      } else {
+        int desired_torque = (((msg->data[12] & 0x7FU) << 3) | ((msg->data[13] & 0xE0U) >> 5));
+        desired_torque = to_signed(desired_torque, 10) + 1;
+        bool steer_req = GET_BIT(msg, 125U);
+        violation |= steer_torque_cmd_checks(desired_torque, steer_req, GWM_TORQUE_STEERING_LIMITS);
+      }
     }
 
     if (msg->addr == GWM_LONG_CONTROL) {
@@ -183,55 +227,61 @@ static safety_config gwm_init(uint16_t param) {
     {GWM_HUD, GWM_MAIN_BUS, 64, .check_relay = true}, // HUD and dashboard
   };
 
+  // GWM_CRUISE (0x2AB ACC): MK4 OP_CRUISE re-TXes the camera frame onto main with openpilot set
+  // speed so the OEM cluster tracks VCruiseHelper (stock freezes ACC_SPEED_SELECTION under OP long).
   static const CanMsg GWM_LONG_TX_MSGS[] = {
     {GWM_ADAS_ACTIVATION, GWM_CAMERA_BUS, 8, .check_relay = false}, // Cancel command
     {GWM_RX_STEER_RELATED, GWM_CAMERA_BUS, 64, .check_relay = true}, // EPS steering feedback to camera
     {GWM_STEER_CMD, GWM_MAIN_BUS, 64, .check_relay = true}, // Steering command
     {GWM_LONG_CONTROL, GWM_MAIN_BUS, 64, .check_relay = true}, // Longitudinal control message from camera
     {GWM_HUD, GWM_MAIN_BUS, 64, .check_relay = true}, // HUD and dashboard
+    {GWM_CRUISE, GWM_MAIN_BUS, 64, .check_relay = true}, // ACC cluster set-speed / follow dashes
   };
 
+  // Shared RX checks (hyundai-style macro so the two arrays can't diverge).
+  // BRAKE2 checksum stays ignored: its block-A xor is 0xEE on MK3 but not constant on MK4, and this safety
+  // mode is shared. Counters on GAS/BRAKE2/RX_STEER_RELATED ignored: logs show a systematic ~1/15 counter
+  // irregularity. GAS and RX_STEER_RELATED carry a block-B checksum (see gwm_compute_checksum).
+  #define GWM_COMMON_RX_CHECKS                                                                                                                             \
+    {.msg = {{GWM_ADAS_ACTIVATION, GWM_MAIN_BUS, 8, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* cruise state, angle */     \
+    {.msg = {{GWM_SPEED, GWM_MAIN_BUS, 64, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* speed */                             \
+    {.msg = {{GWM_GAS, GWM_MAIN_BUS, 64, 50U, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* gas pedal */                       \
+    {.msg = {{GWM_BRAKE, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* brake2 */ \
+    {.msg = {{GWM_RX_STEER_RELATED, GWM_MAIN_BUS, 64, 50U, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* eps feedback */       \
+    {.msg = {{GWM_STEER_CMD, GWM_CAMERA_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* stock steering cmd */ \
+    {.msg = {{GWM_CRUISE, GWM_CAMERA_BUS, 64, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* CRUISE_STATE, ACC */     \
+    {.msg = {{GWM_LONG_CONTROL, GWM_CAMERA_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* long control */    \
+    {.msg = {{GWM_BLIND_SPOT, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* blind spot */          \
+    {.msg = {{GWM_HUD, GWM_CAMERA_BUS, 64, 20U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  /* HUD */
+
   static RxCheck gwm_rx_checks[] = {
-    {.msg = {{GWM_ADAS_ACTIVATION, GWM_MAIN_BUS, 8, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // cruise state, steering angle, steer rate
-    {.msg = {{GWM_SPEED, GWM_MAIN_BUS, 64, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // speed
-    {.msg = {{GWM_GAS, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},   // gas pedal
-    {.msg = {{GWM_BRAKE, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // brake2
-    {.msg = {{GWM_RX_STEER_RELATED, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // eps feedback to camera
-    {.msg = {{GWM_STEER_CMD, GWM_CAMERA_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // copy stock steering cmd
-    {.msg = {{GWM_CRUISE, GWM_CAMERA_BUS, 64, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // CRUISE_STATE, ACC
-    {.msg = {{GWM_LONG_CONTROL, GWM_CAMERA_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // Longitudinal control message from camera
-    {.msg = {{GWM_BLIND_SPOT, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // Blind spot monitor
-    {.msg = {{GWM_HUD, GWM_CAMERA_BUS, 64, 20U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // HUD and dashboard
+    GWM_COMMON_RX_CHECKS
   };
 
   // MK4 op-cruise needs GWM_GEAR_STALK whitelisted so the rx hook is called for it (the arm lives there).
   // 20 Hz periodic on the main bus; checksum/counter algorithm not reverse-engineered, so ignore both.
   // Separate array so MK3 (which has no 0xC7) doesn't fault on a missing message.
   static RxCheck gwm_op_cruise_rx_checks[] = {
-    {.msg = {{GWM_ADAS_ACTIVATION, GWM_MAIN_BUS, 8, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // cruise state, steering angle, steer rate
-    {.msg = {{GWM_SPEED, GWM_MAIN_BUS, 64, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // speed
-    {.msg = {{GWM_GAS, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},   // gas pedal
-    {.msg = {{GWM_BRAKE, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // brake2
-    {.msg = {{GWM_RX_STEER_RELATED, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // eps feedback to camera
-    {.msg = {{GWM_STEER_CMD, GWM_CAMERA_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // copy stock steering cmd
-    {.msg = {{GWM_CRUISE, GWM_CAMERA_BUS, 64, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // CRUISE_STATE, ACC
-    {.msg = {{GWM_LONG_CONTROL, GWM_CAMERA_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // Longitudinal control message from camera
-    {.msg = {{GWM_BLIND_SPOT, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // Blind spot monitor
-    {.msg = {{GWM_HUD, GWM_CAMERA_BUS, 64, 20U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // HUD and dashboard
+    GWM_COMMON_RX_CHECKS
     {.msg = {{GWM_GEAR_STALK, GWM_MAIN_BUS, 8, 20U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // MK4: gentle-DOWN engage gesture
   };
+
+  gen_crc_lookup_table_8(0x1D, gwm_crc8_lut_1d);
 
   bool gwm_longitudinal = false;
   gwm_op_cruise = false;
   gear_stalk_down_prev = false;
-  #ifdef ALLOW_DEBUG
-   const int FLAG_GWM_LONG_CONTROL = 1;
-   const int FLAG_GWM_OP_CRUISE = 2;
-   gwm_longitudinal = GET_FLAG(param, FLAG_GWM_LONG_CONTROL);
-   gwm_op_cruise = GET_FLAG(param, FLAG_GWM_OP_CRUISE);
- #else
-   SAFETY_UNUSED(param);
- #endif
+  gwm_angle_control = false;
+#ifdef ALLOW_DEBUG
+  const int FLAG_GWM_LONG_CONTROL = 1;
+  const int FLAG_GWM_OP_CRUISE = 2;
+  const int FLAG_GWM_ANGLE_CONTROL = 4;
+  gwm_longitudinal = GET_FLAG(param, FLAG_GWM_LONG_CONTROL);
+  gwm_op_cruise = GET_FLAG(param, FLAG_GWM_OP_CRUISE);
+  gwm_angle_control = GET_FLAG(param, FLAG_GWM_ANGLE_CONTROL);
+#else
+  SAFETY_UNUSED(param);
+#endif
 
   // FIXME: cppcheck thinks that gwm_longitudinal is always false. This is not true
   // if ALLOW_DEBUG is defined but cppcheck is run without ALLOW_DEBUG

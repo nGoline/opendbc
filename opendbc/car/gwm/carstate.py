@@ -1,4 +1,4 @@
-from opendbc.car import Bus, CanBusBase, create_button_events, structs
+from opendbc.car import Bus, create_button_events, structs
 from opendbc.can.parser import CANParser
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
@@ -20,6 +20,16 @@ ButtonType = structs.CarState.ButtonEvent.Type
 MK4_CRUISE_LONG_PRESS = 50  # mirrors CRUISE_LONG_PRESS in selfdrive/car/cruise.py
 MK4_SCROLL_HOLD = MK4_CRUISE_LONG_PRESS + 4  # 54
 
+# MK4 steeringPressed hysteresis (shared EventName.steerOverride / "take control"):
+# route 00000016: eng+lat p90 |tq|~90, real grabs 122–257. Flat threshold 120 chattered at the
+# edge and flooded logs/UI when a hand rested near the limit. Enter pressed above 140; leave
+# below 100 (matches carcontroller OVERRIDE_TORQUE release band).
+# Hands-off EPS reaction still reaches p99≈127–129 / max≈140 in curves (routes 70/72/73).
+# ON must sit above that band so EventName.steerOverride does not soft-disable mid-curve;
+# aligns with carcontroller OVERRIDE_TORQUE=130 (lat cmd) — pressed alert is the noisier path.
+MK4_STEER_PRESSED_ON = 155
+MK4_STEER_PRESSED_OFF = 120
+
 
 class CarState(CarStateBase):
   def __init__(self, CP):
@@ -27,6 +37,9 @@ class CarState(CarStateBase):
     self.steer_and_ap_stalk_msg = {}
     self.eps_stock_values = {}
     self.eps_stock_raw = None  # MK4: raw bytes of the last EPS RX_STEER_RELATED (0x147) frame, for the camera hands-on keepalive
+    self.acc_stock_raw = None  # MK4: raw bytes of camera ACC (0x2AB), for cluster set-speed re-TX
+    self.acc_cmd_stock_raw = None  # MK4: raw ACC_CMD (0x143) — packer zeros unmodeled bytes
+    self.hud_stock_raw = None  # MK4: raw LATERAL_STATE (0x23D) for cluster/HUD chrome
     self.camera_stock_values = {}
     self.longitudinal_stock_values = {}
     self.hud_stock_values = {}
@@ -35,7 +48,7 @@ class CarState(CarStateBase):
     self.is_activation_lever_pulled = False
     self.prev_activation_lever_pulled = False
     self.main_on = False
-    self.regen_level = 16  # MK4 driver regen-level selector (msg 726 REGEN_LEVEL): 8=Normal, 16=Low, 24=Heavy. Default Low.
+    self.steer_pressed_latched = False  # MK4 hysteresis for steeringPressed
 
     # MK4 own-cruise (pcmCruise=False) button/engage state (see update()).
     self.prev_enable_gesture = False
@@ -64,10 +77,6 @@ class CarState(CarStateBase):
     self.longitudinal_stock_values = copy.copy(cp_cam.vl["ACC_CMD"])
     self.hud_stock_values = copy.copy(cp_cam.vl["LATERAL_STATE"])
 
-    if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
-      # Driver's regen-level setting; carcontroller uses it to set the regen brake-state entry threshold.
-      self.regen_level = int(cp.vl["REGEN_CONFIG"]["REGEN_LEVEL"])
-
     self.parse_wheel_speeds(ret,
       cp.vl["WHEEL_SPEEDS"]["FRONT_LEFT_WHEEL_SPEED"],
       cp.vl["WHEEL_SPEEDS"]["FRONT_RIGHT_WHEEL_SPEED"],
@@ -82,6 +91,8 @@ class CarState(CarStateBase):
     ret.accFaulted = bool(cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 0)
     ret.cruiseState.speed = cp_cam.vl["ACC"]["ACC_SPEED_SELECTION"] * CV.KPH_TO_MS
     if not self.CP.openpilotLongitudinalControl:
+      # stock-long: ACC_SPEED_SELECTION hasn't been validated as the true OEM setpoint in this mode,
+      # so keep the sentinel rather than surface a possibly-bogus set speed
       ret.cruiseState.speed = -1
 
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
@@ -116,21 +127,15 @@ class CarState(CarStateBase):
                       GearShifter.park
 
     # STEERING_ANGLE is an unsigned magnitude; STEERING_DIRECTION / RATE_DIRECTION give the side.
-    # openpilot convention: steeringAngleDeg POSITIVE = LEFT turn.
-    if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
-      # Sign corrected 2026-06-22: the previous `(1 if DIRECTION else -1)` form was INVERTED — it read
-      # POSITIVE on RIGHT turns (proven via GPS heading, corr +0.82). openpilot's canonical steering angle is
-      # OPPOSITE-signed to desiredCurvature: the shared-code command (actuators.steeringAngleDeg =
-      # get_steer_from_curvature(-desiredCurvature)) correlates -0.9 with desiredCurvature and the physical wheel
-      # tracks it, yet the old readback correlated -0.9 with that command (= same sign as desiredCurvature) =>
-      # flipped. A flipped readback fed paramsd a sign-wrong angle↔yaw relationship (likely the steerRatio/
-      # angleOffset runaway) and rendered the UI steering wheel backwards. Matches the MK3 branch and Tesla
-      # (which negates its raw SAS for the same reason).
-      ret.steeringAngleDeg = cp.vl["STEER_AND_AP_STALK"]["STEERING_ANGLE"] * (-1 if cp.vl["STEER_AND_AP_STALK"]["STEERING_DIRECTION"] else 1)
-      ret.steeringRateDeg = cp.vl["STEER_AND_AP_STALK"]["STEERING_RATE"] * (-1 if cp.vl["STEER_AND_AP_STALK"]["RATE_DIRECTION"] > 0 else 1)
-    else:
-      ret.steeringAngleDeg = cp.vl["STEER_AND_AP_STALK"]["STEERING_ANGLE"] * (-1 if cp.vl["STEER_AND_AP_STALK"]["STEERING_DIRECTION"] else 1)
-      ret.steeringRateDeg = cp.vl["STEER_AND_AP_STALK"]["STEERING_RATE"] * (-1 if (cp.vl["STEER_AND_AP_STALK"]["RATE_DIRECTION"] > 0) else 1)
+    # openpilot convention: steeringAngleDeg POSITIVE = LEFT turn. Both platforms use the same encoding.
+    # MK4 sign corrected 2026-06-22: the previous `(1 if DIRECTION else -1)` form was INVERTED — it read
+    # POSITIVE on RIGHT turns (proven via GPS heading, corr +0.82). openpilot's canonical steering angle is
+    # OPPOSITE-signed to desiredCurvature (the shared-code command negates it and the wheel tracks that); a
+    # flipped readback fed paramsd a sign-wrong angle↔yaw relationship and rendered the UI wheel backwards.
+    # Tesla negates its raw SAS for the same reason.
+    stalk = cp.vl["STEER_AND_AP_STALK"]
+    ret.steeringAngleDeg = stalk["STEERING_ANGLE"] * (-1 if stalk["STEERING_DIRECTION"] else 1)
+    ret.steeringRateDeg = stalk["STEERING_RATE"] * (-1 if stalk["RATE_DIRECTION"] > 0 else 1)
 
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
       # EPS_FAULT_PERMANENT (bit125) cycles 0/1 during normal MK4 operation → spurious
@@ -147,12 +152,19 @@ class CarState(CarStateBase):
       ret.steeringTorqueEps = ret.steeringTorque
     else:
       ret.steeringTorqueEps = cp.vl["RX_STEER_RELATED"]["B_RX_EPS_TORQUE"]
-    # steeringPressed gates the REAL lateral override: car_specific.py fires steerOverride (-> OVERRIDE_LATERAL,
-    # openpilot stops steering) whenever this is True. The OEM LKAS keeps steering through driver torque up to ~100 (median handoff) and
-    # tolerates spikes to ~156. Raise the MK4 gate toward that so the driver can rest a hand; MK3 keeps
-    # the stock 50. (carcontroller's debounced override is a secondary, finer gate for a sustained grab.)
+    # Two independent lateral gates on MK4 (do not conflate):
+    # (1) steeringPressed (here): shared car_specific EventName.steerOverride / OVERRIDE_LATERAL.
+    #     Hysteresis ON 155 / OFF 120 — was 140/100; hands-off peaks still hit ~140 (routes 70/72/73)
+    #     and kept firing steerOverride. MK3 stays a flat 50.
+    # (2) carcontroller OVERRIDE_TORQUE (130) + debounce: drops lat_active on a sustained grab for the
+    #     angle command path. Tuned for fully hands-off driving (clean takeovers), not "rest a hand".
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
-      ret.steeringPressed = abs(ret.steeringTorque) > 120
+      tq = abs(ret.steeringTorque)
+      if self.steer_pressed_latched:
+        self.steer_pressed_latched = tq > MK4_STEER_PRESSED_OFF
+      else:
+        self.steer_pressed_latched = tq > MK4_STEER_PRESSED_ON
+      ret.steeringPressed = self.steer_pressed_latched
     else:
       ret.steeringPressed = abs(ret.steeringTorque) > 50
 
@@ -167,7 +179,13 @@ class CarState(CarStateBase):
     ret.rightBlindspot = bool(cp.vl["RADAR_BEHIND"]["BSM_RIGHT"] > 0)
 
     cancel = bool(cp.vl["STEER_AND_AP_STALK"]["AP_CANCEL_COMMAND"])
-    if cancel or ret.brakePressed:
+    if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
+      # Only stalk/button cancel drops main_on. Brake already cancels *enabled* via selfdrived
+      # pedalPressed; clearing available on every brake flooded wrongCarMode for most of route
+      # 00000016 (~11k events) and forced a re-arm before re-engage.
+      if cancel:
+        self.main_on = False
+    elif cancel or ret.brakePressed:
       self.main_on = False
 
     if self.CP.carFingerprint == CAR.GWM_HAVAL_H6_MK4:
@@ -175,8 +193,7 @@ class CarState(CarStateBase):
       # the wheel/stalk buttons, NOT the OEM ACC (which freezes its set speed once openpilot owns the car).
       # Engagement is the gentle-or-further DOWN stalk gesture (msg 0xC7 GEAR_STALK bit STALK_DOWN) so a
       # gentle DOWN also engages, not just the hard FURTHER_DOWN detent. The panda arms its controls latch
-      # on the same bit (gwm.h, gated on GwmSafetyFlags.OP_CRUISE); cruiseState.available mirrors our latch
-      # so the two safety gates never desync.
+      # on the same bit (gwm.h, gated on GwmSafetyFlags.OP_CRUISE).
       enable_gesture = bool(cp.vl["GEAR_STALK"]["STALK_DOWN"])
       # DOWN is the same physical motion as shifting N→D / R→D, so gate engagement to when the gear
       # is already D (this frame and last) and the car is moving — a gear shift must not auto-engage. Latch
@@ -221,7 +238,10 @@ class CarState(CarStateBase):
       self.prev_cancel = int(cancel)
       self.prev_drive_mode = drive_mode
 
-      ret.cruiseState.available = self.main_on
+      # Available whenever in Drive and ACC not faulted — not only after stalk arm. Coupling available
+      # to main_on made wrongCarMode fire for entire segments until the next engage (route 00000016:
+      # ~11k wrongCarMode). Stalk still required for enable; cancel still drops main_on.
+      ret.cruiseState.available = bool(drive_mode == 1) and not ret.accFaulted
       # pcmCruise=False: selfdrived owns cruiseState.enabled — don't set it here.
     else:
       # MK3 (unchanged): pcmCruise=True, engage latch off the AP_ENABLE stalk gesture's falling edge.
@@ -236,15 +256,8 @@ class CarState(CarStateBase):
 
   @staticmethod
   def get_can_parsers(CP):
-    # Compute bus offset from number of safetyConfigs so multipanda setups
-    # (internal + external pandas) map DBCs to the correct physical bus.
-    can_base = CanBusBase(CP, None)
-    main_bus = can_base.offset
-    adas_bus = can_base.offset + 1
-    cam_bus = can_base.offset + 2
-
     return {
-      Bus.main: CANParser(DBC[CP.carFingerprint][Bus.pt], [], main_bus),
-      Bus.adas: CANParser(DBC[CP.carFingerprint][Bus.pt], [], adas_bus),
-      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], cam_bus),
+      Bus.main: CANParser(DBC[CP.carFingerprint][Bus.pt], [], 0),
+      Bus.adas: CANParser(DBC[CP.carFingerprint][Bus.pt], [], 1),
+      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], 2),
     }

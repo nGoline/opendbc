@@ -22,8 +22,20 @@ class CarControllerParams:
     ([], []), ([], []),    # v1 rate-limit tables unused (vehicle-model path)
     MAX_LATERAL_ACCEL=3.0,  # m/s^2 (~ISO 11270 comfort; OEM route_7a peaked 3.57, so we're already conservative)
     MAX_LATERAL_JERK=2.5,   # m/s^3 — conservative/smooth
-    MAX_ANGLE_RATE=2.0,     # deg per 20ms frame (= 100 deg/s) — low-speed backstop (jerk limit governs at speed)
+    # Low-speed backstop (jerk limit governs at speed). Was 2.0°/20ms (=100°/s): crawl hunting in
+    # stop-and-go (route 00000008). 1.0 (=50°/s) softens wiggle. Routes 70/72/73 (post that tune)
+    # still showed cmd reversals >> wheel at <40 kph — carcontroller applies an extra speed-scaled
+    # rate on top (see MK4_ANGLE_RATE_*); this constant is the high-speed ceiling.
+    MAX_ANGLE_RATE=1.0,     # deg per 20ms frame (= 50 deg/s); low-speed extra cap in carcontroller
   )
+
+  # MK4 extra angle-rate schedule (deg/20ms), applied after apply_steer_angle_limits_vm.
+  # Routes 70/72/73: rev_cmd 2–3× rev_wheel below 40 kph. Soften crawl without limiting highway.
+  MK4_ANGLE_RATE_LOW = 0.6       # <= MK4_ANGLE_RATE_V_LO
+  MK4_ANGLE_RATE_HIGH = 1.0      # >= MK4_ANGLE_RATE_V_HI (matches ANGLE_LIMITS.MAX_ANGLE_RATE)
+  MK4_ANGLE_RATE_V_LO = 25.0     # kph
+  MK4_ANGLE_RATE_V_HI = 45.0     # kph
+
 
   # MK4: clamp the commanded angle to within this many deg of the MEASURED wheel. The EPS under-executes
   # angle offsets (~0.76x), so when the wheel trails, the model winds the command far past it (rails to
@@ -32,6 +44,10 @@ class CarControllerParams:
   # <0.2% of normal-driving frames (offline-validated on drives ce-5/6/8/10). NOT an override cure —
   # the limp's trigger isn't the error magnitude — just a windup limiter that complements the A_RX fault.
   MK4_ANGLE_ERROR_MAX = 4.0  # deg
+  # When A_RX_STEER_REQUESTED != 1 (EPS override/limp/not-granting), hold a tight band around the wheel so
+  # we don't keep commanding large opposite angles into a non-executing EPS (route 00000002 seg14/26:
+  # softDisable with desired vs wheel opposite-signed while torque was low).
+  MK4_ANGLE_ERROR_MAX_NOT_OBEYING = 1.0  # deg
 
   def __init__(self, CP: CarParams):
     self.STEER_DELTA_UP = 4
@@ -44,6 +60,9 @@ class GwmSafetyFlags(IntFlag):
   # MK4 owns its own cruise loop (pcmCruise=False). The panda must arm controls on the gentle-DOWN stalk
   # gesture (msg 0xC7 GEAR_STALK), not the FURTHER_DOWN-only msg 161 bit47 the MK3 path uses.
   OP_CRUISE = 2
+  # MK4 steers by angle (14-bit STEER_REQUEST in STEER_CMD): the panda must validate the angle command
+  # with steer_angle_cmd_checks_vm instead of decoding the MK3 torque bytes.
+  ANGLE_CONTROL = 4
 
 
 @dataclass

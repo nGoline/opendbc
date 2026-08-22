@@ -1,13 +1,34 @@
 #!/usr/bin/env python3
 import unittest
+import numpy as np
 
 from opendbc.can.dbc import DBC
-from opendbc.car.gwm.values import GwmSafetyFlags
+from opendbc.car.gwm.values import CAR, GwmSafetyFlags
+from opendbc.car.gwm.interface import CarInterface
+from opendbc.car.lateral import AngleSteeringLimits, get_max_angle_delta_vm, get_max_angle_vm
+from opendbc.car.vehicle_model import VehicleModel
 from opendbc.car.structs import CarParams
 import opendbc.safety.tests.common as common
 from opendbc.safety.tests.libsafety import libsafety_py
-from opendbc.safety.tests.common import CANPackerSafety
+from opendbc.safety.tests.common import CANPackerSafety, away_round
 from opendbc.car.gwm.gwmcan import checksum as _checksum
+
+
+def round_angle_mk4(apply_angle, can_offset=0):
+  # STEER_REQUEST: factor 0.1, offset -779.6 (mirrors test_tesla.round_angle)
+  apply_angle_can = (apply_angle + 779.6) / 0.1 + can_offset
+  rnd_offset = 1e-5 if apply_angle >= 0 else -1e-5
+  return away_round(apply_angle_can + rnd_offset) * 0.1 - 779.6
+
+
+class SafetyAngleParams:
+  """Mirror of the panda-side vm angle limits (opendbc/safety/lateral.h steer_angle_cmd_checks_vm):
+  ISO lateral accel/jerk plus the average-road-roll allowance. The car-side CarControllerParams is
+  intentionally tighter (3.0 / 2.5), so the safety boundary must be tested with these values."""
+  STEER_STEP = 2  # 50 Hz command rate at the 100 Hz control step
+  ANGLE_LIMITS = AngleSteeringLimits(360, ([], []), ([], []),
+                                     MAX_LATERAL_ACCEL=3.0 + 9.81 * 0.06,
+                                     MAX_LATERAL_JERK=3.0 + 9.81 * 0.06)
 
 
 opendbc = "gwm_haval_h6_mk3_generated"
@@ -39,14 +60,18 @@ def checksum(msg):
     ret[0] = _checksum(ret[1:], 0x2D)
   elif addr == 0x13B: # WHEEL_SPEEDS
     ret[0] = _checksum(ret[1:8], 0x7F)
+  elif addr == 0x147: # RX_STEER_RELATED, block B
+    ret[8] = _checksum(ret[9:16], 0x61)
+  elif addr == 0x60: # CAR_OVERALL_SIGNALS2 (gas), block B
+    ret[8] = _checksum(ret[9:16], 0x95)
 
   return addr, ret, bus
 
 
 class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, common.LongitudinalGasBrakeSafetyTest):
-  TX_MSGS = [[0x12B, 0], [0x143, 0], [0x147, 2], [0xA1, 2]] # Steer, long, wheel touch, cancel
-  RELAY_MALFUNCTION_ADDRS = {0: (0x12B, 0x143, 0x23D), 2: (0x147,)}
-  FWD_BLACKLISTED_ADDRS = {0: [0x147], 2: [0x12B, 0x143, 0x23D]}
+  TX_MSGS = [[0x12B, 0], [0x143, 0], [0x147, 2], [0xA1, 2], [0x23D, 0], [0x2AB, 0]]  # steer, long, wheel touch, cancel, HUD, ACC cluster
+  RELAY_MALFUNCTION_ADDRS = {0: (0x12B, 0x143, 0x23D, 0x2AB), 2: (0x147,)}
+  FWD_BLACKLISTED_ADDRS = {0: [0x147], 2: [0x12B, 0x143, 0x23D, 0x2AB]}
 
   MAX_RATE_UP = 4
   MAX_RATE_DOWN = 6
@@ -72,7 +97,7 @@ class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, 
 
   def _user_gas_msg(self, gas):
     values = {"GAS_POSITION": gas}
-    return self.packer.make_can_msg_safety("CAR_OVERALL_SIGNALS2", 0, values)
+    return self.packer.make_can_msg_safety("CAR_OVERALL_SIGNALS2", 0, values, fix_checksum=checksum)
 
   def _user_brake_msg(self, brake):
     values = {"PEDAL_BRAKE_PRESSED": brake}
@@ -98,7 +123,7 @@ class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, 
     torque = max(min(torque, max_torque), min_torque)
 
     values = {"B_RX_EPS_TORQUE": torque}
-    return self.packer.make_can_msg_safety("RX_STEER_RELATED", 0, values)
+    return self.packer.make_can_msg_safety("RX_STEER_RELATED", 0, values, fix_checksum=checksum)
 
   def _torque_cmd_msg(self, torque, steer_req=1):
     # 10-bit signed signal clip to not produce errors on test
@@ -130,6 +155,18 @@ class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, 
     # invalidate checksum
     msg = self._pcm_status_msg(0)
     msg[0].data[0] = 0xFF
+    self.assertFalse(self._rx(msg))
+
+    # eps torque feedback (0x147 block B checksum)
+    self.assertTrue(self._rx(self._torque_meas_msg(0)))
+    msg = self._torque_meas_msg(0)
+    msg[0].data[8] ^= 0xFF
+    self.assertFalse(self._rx(msg))
+
+    # gas (0x60 block B checksum)
+    self.assertTrue(self._rx(self._user_gas_msg(0)))
+    msg = self._user_gas_msg(0)
+    msg[0].data[8] ^= 0xFF
     self.assertFalse(self._rx(msg))
 
 
@@ -185,6 +222,133 @@ class TestGwmOpCruiseSafety(unittest.TestCase):
     self.assertFalse(self.safety.get_controls_allowed())
     self._rx(self._gear_stalk_msg(True))  # still high, no rising edge -> stays disarmed
     self.assertFalse(self.safety.get_controls_allowed())
+
+
+class TestGwmMk4AngleSafety(common.AngleSteeringSafetyTest):
+  """MK4 (angle control): the panda validates the 14-bit STEER_CMD angle with
+  steer_angle_cmd_checks_vm (lateral accel/jerk limits via the vehicle model, Tesla-style)."""
+
+  TX_MSGS = None  # angle-focused test class; excluded from the cross-mode TX scan in common.py
+
+  mk4 = "gwm_haval_h6_mk4_generated"
+
+  STEER_ANGLE_MAX = 360  # deg, matches gwm.h max_angle 3600 (0.1 deg units)
+  DEG_TO_CAN = 10
+
+  # vehicle-model path (like Tesla): v1 rate lookups unused
+  ANGLE_RATE_BP = None
+  ANGLE_RATE_UP = None
+  ANGLE_RATE_DOWN = None
+
+  LATERAL_FREQUENCY = 50  # Hz
+
+  cnt_angle_cmd = 0
+
+  def setUp(self):
+    self.packer = CANPackerSafety(self.mk4)
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm,
+                                 GwmSafetyFlags.LONG_CONTROL | GwmSafetyFlags.OP_CRUISE | GwmSafetyFlags.ANGLE_CONTROL)
+    self.safety.init_tests()
+    self.VM = VehicleModel(CarInterface.get_non_essential_params(CAR.GWM_HAVAL_H6_MK4))
+    # every 0xA1 rx runs the cruise state machine (pcm_cruise_check), and the angle measurement
+    # lives on 0xA1 — prime acc_main_on via the GEAR_STALK engage gesture so measurement frames
+    # don't disengage controls mid-test (re-engagement still needs a fresh rising edge)
+    self._rx(self.packer.make_can_msg_safety("GEAR_STALK", 0, {"STALK_DOWN": 0}))
+    self._rx(self.packer.make_can_msg_safety("GEAR_STALK", 0, {"STALK_DOWN": 1}))
+
+  def _speed_msg(self, speed):
+    # wheel speed signal is kph (factor 0.05924739); tests pass m/s
+    values = {f"{pos}_WHEEL_SPEED": speed * 3.6 for pos in ["FRONT_LEFT", "FRONT_RIGHT", "REAR_LEFT", "REAR_RIGHT"]}
+    return self.packer.make_can_msg_safety("WHEEL_SPEEDS", 0, values, fix_checksum=checksum)
+
+  def _angle_cmd_msg(self, angle: float, enabled: bool, increment_timer: bool = True):
+    values = {"STEER_REQUEST": angle, "EPS_LKAS_ANGLE_ENABLE": 0x3F if enabled else 0x1F}
+    if increment_timer:
+      self.safety.set_timer(self.cnt_angle_cmd * int(1e6 / self.LATERAL_FREQUENCY))
+      self.__class__.cnt_angle_cmd += 1
+    return self.packer.make_can_msg_safety("STEER_CMD", 0, values)
+
+  def _angle_meas_msg(self, angle: float):
+    values = {"STEERING_ANGLE": abs(angle), "STEERING_DIRECTION": 1 if angle < 0 else 0}
+    return self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 0, values, fix_checksum=checksum)
+
+  def test_angle_cmd_when_enabled(self):
+    # lateral accel and jerk are properly tested below (vm limits, like Tesla).
+    # NOTE: steer_angle_cmd_checks_vm does NOT enforce limits.max_angle in the active path
+    # (upstream semantics, same as Tesla): the ISO lateral-accel limit is the effective cap,
+    # and at the 1 m/s fudged-speed floor it sits above 360 deg (parking needs near-full lock).
+    pass
+
+  def test_lateral_accel_limit(self):
+    # commanded angle must stay under the vm lateral-accel limit for the measured speed
+    for speed in np.linspace(1., 40., 20):
+      speed = float(speed)
+      for sign in (-1, 1):
+        self.safety.set_controls_allowed(True)
+        self._reset_speed_measurement(speed + 1)  # the panda fudges measured speed down by 1
+
+        # comfortably at the limit -> allowed (2 CAN units of margin for speed quantization)
+        max_angle = round_angle_mk4(get_max_angle_vm(speed, self.VM, SafetyAngleParams), -2) * sign
+        max_angle = float(np.clip(max_angle, -self.STEER_ANGLE_MAX, self.STEER_ANGLE_MAX))
+        self.safety.set_desired_angle_last(round(max_angle * self.DEG_TO_CAN))
+        self.assertTrue(self._tx(self._angle_cmd_msg(max_angle, True)))
+
+        # above the limit -> blocked (unless the vm limit exceeds the 360 deg hard cap at low speed)
+        above_raw = round_angle_mk4(get_max_angle_vm(speed, self.VM, SafetyAngleParams), 4) * sign
+        above = float(np.clip(above_raw, -self.STEER_ANGLE_MAX, self.STEER_ANGLE_MAX))
+        should_tx = abs(above_raw) >= self.STEER_ANGLE_MAX
+        self.safety.set_desired_angle_last(round(above * self.DEG_TO_CAN))
+        self.assertEqual(should_tx, self._tx(self._angle_cmd_msg(above, True)))
+
+  def test_lateral_jerk_limit(self):
+    # per-frame angle delta must stay under the vm lateral-jerk limit for the measured speed
+    for speed in np.linspace(5., 40., 15):
+      speed = float(speed)
+      for sign in (-1, 1):
+        self.safety.set_controls_allowed(True)
+        self._reset_speed_measurement(speed + 1)
+        self._tx(self._angle_cmd_msg(0, True))
+
+        # within the per-frame delta -> allowed
+        max_delta = round_angle_mk4(get_max_angle_delta_vm(speed, self.VM, SafetyAngleParams), -2) * sign
+        self.assertTrue(self._tx(self._angle_cmd_msg(max_delta, True)))
+        self.assertTrue(self._tx(self._angle_cmd_msg(0, True)))
+
+        # above the per-frame delta -> blocked
+        over_delta = round_angle_mk4(get_max_angle_delta_vm(speed, self.VM, SafetyAngleParams), 4) * sign
+        self.assertFalse(self._tx(self._angle_cmd_msg(over_delta, True)))
+        # recover
+        self.assertTrue(self._tx(self._angle_cmd_msg(0, True)))
+
+  def test_no_angle_control_when_disallowed(self):
+    # the EPS angle-enable pair must never be commanded active while controls are not allowed
+    self.safety.set_controls_allowed(False)
+    self._reset_angle_measurement(0)
+    self.assertFalse(self._tx(self._angle_cmd_msg(0, True)))
+    # passthrough idle frame (enable low, angle at measured wheel) is fine
+    self.assertTrue(self._tx(self._angle_cmd_msg(0, False)))
+
+
+class TestGwmMk4TxSafety(common.SafetyTest):
+  """TX whitelist / forwarding / relay-malfunction checks under the full MK4 flag set
+  (LONG_CONTROL | OP_CRUISE | ANGLE_CONTROL). The whitelist and fwd config are flag-independent
+  in gwm_init, but only this class proves the flags don't widen them; the cruise/steering
+  semantics that DO change per flag are covered by the focused classes above."""
+
+  TX_MSGS = [[0x12B, 0], [0x143, 0], [0x147, 2], [0xA1, 2], [0x23D, 0], [0x2AB, 0]]  # steer, long, wheel touch, cancel, HUD, ACC cluster
+  RELAY_MALFUNCTION_ADDRS = {0: (0x12B, 0x143, 0x23D, 0x2AB), 2: (0x147,)}
+  FWD_BLACKLISTED_ADDRS = {0: [0x147], 2: [0x12B, 0x143, 0x23D, 0x2AB]}
+
+  def setUp(self):
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm,
+                                 GwmSafetyFlags.LONG_CONTROL | GwmSafetyFlags.OP_CRUISE | GwmSafetyFlags.ANGLE_CONTROL)
+    self.safety.init_tests()
+
+  # attr-only test from CarSafetyTest (this class skips the rest of that suite, which needs
+  # the per-platform message builders and flag-dependent cruise semantics)
+  test_relay_malfunction = common.CarSafetyTest.test_relay_malfunction
 
 
 if __name__ == "__main__":
