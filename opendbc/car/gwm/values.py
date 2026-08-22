@@ -1,15 +1,12 @@
 from dataclasses import dataclass, field
 
-from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, Bus, CarSpecs, DbcDict, PlatformConfig, Platforms, uds
+from opendbc.car import Bus, CarSpecs, DbcDict, PlatformConfig, Platforms, uds
 from opendbc.car.structs import CarParams
-from opendbc.car.lateral import AngleSteeringLimits, ISO_LATERAL_ACCEL
+from opendbc.car.lateral import AngleSteeringLimits
 from opendbc.car.docs_definitions import CarDocs, CarHarness, CarParts
 from opendbc.car.fw_query_definitions import FwQueryConfig, Request, p16
 
 Ecu = CarParams.Ecu
-
-# ~3.4 degrees, 6% superelevation. Higher actual roll lowers lateral acceleration.
-AVERAGE_ROAD_ROLL = 0.06
 
 
 class CarControllerParams:
@@ -17,59 +14,27 @@ class CarControllerParams:
   # every second frame.
   STEER_STEP = 2
 
-  # Lateral limits use the VEHICLE MODEL (v2), as Tesla does, not the hand-tuned
-  # speed-breakpoint tables (v1). The v1 tables here were guesses and they were
-  # measurably too tight: on the drives of 2026-08-21 they cut more than 0.5 deg
-  # off openpilot's request in 15-23% of engaged frames, up to 18.3 deg, which
-  # under-steers curves and cuts the lane. At 25 m/s v1 allowed 7.5 deg/s while
-  # the camera's own command routinely slews faster than that.
+  # Angle-rate limits, in degrees of commanded wheel angle per send step (50 Hz).
+  # The breakpoints are v_ego in m/s. These bound how fast openpilot may move the
+  # command; the panda safety mode enforces the same envelope independently.
   #
-  # v2 derives the limits from constant lateral accel and jerk instead, which is
-  # speed-correct by construction - 22.4 deg/s at 25 m/s - and is what
-  # opendbc/safety/lateral.h says should replace the breakpoint function.
+  # Reference measured from the car's own stock lane-centering (STEER_CMD while
+  # the EPS was executing it): the command stayed within +-8 deg and moved at a
+  # p99 of ~5 deg/s, spiking to ~25 deg/s only at engagement transitions. These
+  # limits sit a little above that for authority without approaching the rates
+  # the EPS rejects. They are a starting point and want road tuning - if the
+  # wheel lags in a curve, raise the high-speed value; if it feels twitchy or
+  # faults, lower it.
   ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(
-    300,        # max commanded angle, deg
-    ([], []),   # v1 tables unused - the vehicle model supplies the rate limits
-    ([], []),
-
-    # Extra tolerance for average road roll, since the panda has no roll estimate.
-    MAX_LATERAL_ACCEL=ISO_LATERAL_ACCEL + (ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL),
-    MAX_LATERAL_JERK=3.0 + (ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL),
-
-    # Hard ceiling on slew, mostly for low speed where the model's limit goes
-    # very large. MEASURED off the camera over 30267 command steps: p99.99 is
-    # 1.0 deg/step and the largest step it ever took was 3.8, so the EPS
-    # demonstrably accepts well beyond this.
-    MAX_ANGLE_RATE=3.0,  # deg per 20 ms frame
+    300,                                    # max commanded angle, deg
+    ([0., 5., 25.], [1.0, 0.5, 0.15]),      # up:   deg/step vs m/s
+    ([0., 5., 25.], [1.5, 0.8, 0.25]),      # down: deg/step vs m/s
   )
 
   # Driver-torque threshold (raw units of STEER_TORQUE.DRIVER_TORQUE) above which
   # the driver is considered to be holding the wheel. Provisional - confirm on
   # the road against a light hand.
   STEER_DRIVER_ALLOWANCE = 120
-
-  # Never command an angle more than this far from where the wheel actually is.
-  #
-  # This is what makes the wheel yield. The EPS servos to the commanded angle, and
-  # the torque it applies grows with the error, so bounding the error bounds how
-  # hard it can push back. Push the wheel, it moves, the command follows it, and
-  # the resistance never builds.
-  #
-  # MEASURED off the camera, which does exactly this. Across 2.6M frames where the
-  # OEM was commanding - ICC lane centering and ACC lane-departure nudges, several
-  # drives - |commanded - measured| never exceeded 4.6 deg, and the ceiling is flat
-  # across every driver-torque bucket, so it is a hard clamp and not a torque-
-  # dependent softening. Normal tracking sits at a median of 0.4 deg, so 4.0 leaves
-  # the controller all the room it needs and only bites when the driver is winning.
-  #
-  # openpilot without this clamp reached 22-28 deg of error against a resisting
-  # driver, which saturates the EPS. That is the whole of the "wheel is stiff and
-  # fights back" complaint. See haval-port captures/2026-08-21-steering-effort.md.
-  #
-  # Same mechanism Ford uses (apply_ford_curvature_limits clips to current
-  # curvature +- CURVATURE_ERROR) and the panda supports natively via
-  # enforce_angle_error / max_angle_error, which is the follow-up to this.
-  MAX_ANGLE_ERROR = 4.0
 
 
 # Wheel speed is encoded at 0.05924739 km/h per count in the DBC (the value the
