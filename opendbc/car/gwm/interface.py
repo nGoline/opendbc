@@ -49,7 +49,13 @@ class CarInterface(CarInterfaceBase):
     # by ~0.08 s. Left at the 0.0 default the angle controller has no lead at all
     # and hunts.
     ret.steerActuatorDelay = 0.08
-    ret.steerLimitTimer = 0.4
+    # 1.0, matching ford and nissan - the other angle ports that use the same crude
+    # saturation heuristic. LatControlAngle flags saturation on
+    # |desired - measured| > 2.5 deg sustained for this long, which on an angle car
+    # fires on ordinary tracking lag entering a turn and nags with a repeating
+    # chime. tesla and hyundai keep 0.4 only because they take the precise
+    # steer_limited_by_safety signal instead of that heuristic; we cannot.
+    ret.steerLimitTimer = 1.0
 
     ret.wheelSpeedFactor = WHEEL_SPEED_FACTOR
     ret.radarUnavailable = True

@@ -43,7 +43,18 @@ class CarControllerParams:
   # INPUT bounds nothing, because when the driver moves the wheel faster than the
   # command may slew, the command cannot follow and the error runs away. Driven
   # 2026-08-22 with the clamp on the input: 19.1% of frames exceeded it, to 88.5 deg.
-  MAX_ANGLE_ERROR = 4.0  # deg
+  # 8.0 deg. This was 4.0, matching the widest error the camera was ever seen to
+  # run. That was too tight: entering a turn openpilot wants to lead the wheel by
+  # about 7 deg, and capping the lead at 4 left the command 3.5 deg short of the
+  # request, so the wheel arrived late. Measured 2026-08-23, |desired - measured|
+  # runs to p99 3.78 and a max of 8.18 - that is the lead the controller actually
+  # needs, and throttling it is what under-steers turns and trips steerSaturated.
+  #
+  # This is now a backstop rather than the override mechanism. Overrides are
+  # handled by handing control back at OVERRIDE_TORQUE, which stops commanding
+  # altogether; the clamp only bounds the EPS during the ~70 ms before that latch
+  # engages, and for forces too light to trigger it.
+  MAX_ANGLE_ERROR = 8.0  # deg
 
   # --- driver override -------------------------------------------------------
   # openpilot STOPS COMMANDING when the driver takes the wheel, as Tesla does
