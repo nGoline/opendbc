@@ -7,6 +7,9 @@ legend = ["LAT_ACCEL_FACTOR", "MAX_LAT_ACCEL_MEASURED", "FRICTION"]
 "NISSAN_LEAF" = [nan, 1.5, nan]
 "NISSAN_ROGUE" = [nan, 1.5, nan]
 
+# GWM angle based controllers
+"GWM_HAVAL_H6_PHEV19_MK4" = [nan, 2.0, nan]
+
 # PSA angle based controllers
 "PSA_PEUGEOT_208" = [nan, 2.0, nan]
 
