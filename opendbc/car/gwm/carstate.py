@@ -1,5 +1,6 @@
 from opendbc.can.parser import CANParser
 from opendbc.car import Bus, CanBusBase, structs
+from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.gwm.values import DBC, CarControllerParams
 
@@ -94,8 +95,12 @@ class CarState(CarStateBase):
     # let cruiseState.enabled do the gating.
     ret.cruiseState.available = True
     ret.cruiseState.standstill = ret.standstill and ret.cruiseState.enabled
-    # openpilot is not driving longitudinal, so it has no set speed of its own.
-    ret.cruiseState.speed = -1
+    # The stock ACC's set speed, which openpilot displays. Leaving this at -1 fed
+    # openpilot a nonsense negative speed. ACC_SPEED_SELECTION is byte 22 of 0x2ab
+    # in km/h - verified against the drive of 2026-08-23: set 80 holds an actual
+    # p50 of 79.3 km/h and set 100 holds 90.7 rising to 100.8, with 85/90/95
+    # appearing transiently as the 5 km/h scroll steps between them.
+    ret.cruiseState.speed = cp_cam.vl['ACC']['ACC_SPEED_SELECTION'] * CV.KPH_TO_MS
 
     # blinkers, belt, door. The lamps blink, so debounce them into a steady signal.
     ret.leftBlinker, ret.rightBlinker = self.update_blinker_from_lamp(
