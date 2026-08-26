@@ -36,9 +36,17 @@ class CarState(CarStateBase):
     self.eps_fault_frames = 0
     self.disengage_frames = 0
     # openpilot-owned engagement (pcmCruise=False) from the stalk
+    self.engage_request = False
     self.prev_soft_down = False
     self.prev_gear_d = False
     self.engage_latch = False
+
+  def update_button_enable(self, buttonEvents: list[structs.CarState.ButtonEvent]) -> bool:
+    # CarInterfaceBase.update() calls this after update() and assigns the result to
+    # ret.buttonEnable, so this - not an assignment inside update() - is what
+    # actually reaches openpilot. Engagement here is a stalk gesture rather than a
+    # button event, so the decision is made in update() and simply returned.
+    return self.engage_request
 
   def update(self, can_parsers) -> structs.CarState:
     cp = can_parsers[Bus.pt]
@@ -117,7 +125,11 @@ class CarState(CarStateBase):
     if rising:
       self.engage_latch = gear_d and abs(ret.vEgoRaw) > 0.5
     # buttonEnable is a one-frame request, and must not fire against the brake
-    ret.buttonEnable = bool(rising and self.engage_latch and not ret.brakePressed)
+    # NOTE: do not assign ret.buttonEnable here. CarInterfaceBase.update() overwrites
+    # it unconditionally with self.CS.update_button_enable(...) right after carstate
+    # returns, so an assignment made here is silently discarded. Stash the decision
+    # and let the override below deliver it, which is how gm and volkswagen do it.
+    self.engage_request = bool(rising and self.engage_latch and not ret.brakePressed)
     self.prev_soft_down = soft_down
     self.prev_gear_d = ret.gearShifter == GearShifter.drive
     ret.cruiseState.standstill = ret.standstill and ret.cruiseState.enabled
