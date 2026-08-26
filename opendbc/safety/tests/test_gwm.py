@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from opendbc.car.gwm.values import CarControllerParams
+from opendbc.car.gwm.values import CarControllerParams, GwmSafetyFlags, STALK_REST, STALK_SOFT_DOWN, STALK_HARD_DOWN
 from opendbc.car.lateral import get_max_angle_delta_vm, get_max_angle_vm
 from opendbc.car.structs import CarParams
 from opendbc.car.vehicle_model import VehicleModel
@@ -176,3 +176,86 @@ class TestGwmSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class TestGwmOpCruiseSafety(common.SafetyTestBase):
+  """openpilot owning engagement from the soft-down stalk gesture.
+
+  The stock ACC ignores soft DOWN entirely, so it never engages and never chimes.
+  A hard DOWN is the stock ACC's own gesture and must not engage us, or both
+  systems would be driving the car at once.
+  """
+  MAIN_BUS = 0
+  CAM_BUS = 2
+  TX_MSGS = [[STEER_CMD, 0]]
+
+  def setUp(self):
+    self.packer = CANPackerSafety("gwm_haval_h6_phev_mk4")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, GwmSafetyFlags.OP_CRUISE)
+    self.safety.init_tests()
+
+  def _stalk_msg(self, position: int):
+    # byte 1 of GEAR_STALK: the enumerated position, always a multiple of 15
+    dat = bytearray(8)
+    dat[1] = position * 15
+    return libsafety_py.make_CANPacket(0x0c7, self.MAIN_BUS, bytes(dat))
+
+  def _cancel_msg(self, cancel: bool):
+    dat = bytearray(8)
+    if cancel:
+      dat[5] = 0x40          # AP_CANCEL_COMMAND, byte 5 bit 6
+    return libsafety_py.make_CANPacket(0x0a1, self.MAIN_BUS, bytes(dat))
+
+  def _speed_msg(self, speed):
+    values = {"WHEEL_SPEED_FL": speed * 3.6}
+    return self.packer.make_can_msg_safety("WHEEL_SPEEDS", self.MAIN_BUS, values)
+
+  def _moving(self, moving=True):
+    for _ in range(6):
+      self._rx(self._speed_msg(10.0 if moving else 0.0))
+
+  def test_soft_down_engages_while_moving(self):
+    self._moving()
+    self.safety.set_controls_allowed(False)
+    self._rx(self._stalk_msg(STALK_REST))
+    self._rx(self._stalk_msg(STALK_SOFT_DOWN))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_hard_down_does_not_engage(self):
+    # the stock ACC's own gesture - engaging on it would put both systems in control
+    self._moving()
+    self.safety.set_controls_allowed(False)
+    self._rx(self._stalk_msg(STALK_REST))
+    self._rx(self._stalk_msg(STALK_HARD_DOWN))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_gear_shift_at_standstill_cannot_engage(self):
+    # soft DOWN is the same physical motion as R->N, so a stationary shift must not arm
+    self._moving(False)
+    self.safety.set_controls_allowed(False)
+    self._rx(self._stalk_msg(STALK_REST))
+    self._rx(self._stalk_msg(STALK_SOFT_DOWN))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_engage_needs_a_rising_edge(self):
+    self._moving()
+    self._rx(self._stalk_msg(STALK_SOFT_DOWN))
+    self.safety.set_controls_allowed(False)
+    for _ in range(5):
+      self._rx(self._stalk_msg(STALK_SOFT_DOWN))   # held, no new edge
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_cancel_disengages(self):
+    self._moving()
+    self.safety.set_controls_allowed(True)
+    self._rx(self._cancel_msg(True))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_stock_cruise_does_not_engage_us(self):
+    # with openpilot owning cruise, the stock ACC's engaged bit must be ignored
+    self.safety.set_controls_allowed(False)
+    values = {"CRUISE_ENGAGED": 1}
+    for _ in range(10):
+      self._rx(self.packer.make_can_msg_safety("ACC", self.CAM_BUS, values))
+    self.assertFalse(self.safety.get_controls_allowed())

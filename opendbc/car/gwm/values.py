@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from enum import IntFlag
 
 from opendbc.car import Bus, CarSpecs, DbcDict, PlatformConfig, Platforms, uds
 from opendbc.car.structs import CarParams
@@ -7,6 +8,23 @@ from opendbc.car.docs_definitions import CarDocs, CarHarness, CarParts
 from opendbc.car.fw_query_definitions import FwQueryConfig, Request, p16
 
 Ecu = CarParams.Ecu
+
+
+class GwmSafetyFlags(IntFlag):
+  # openpilot owns engagement from the soft-down stalk gesture instead of following
+  # the stock ACC. Must be set whenever the port runs pcmCruise=False, or openpilot
+  # would believe it is engaged while the panda blocks every frame.
+  OP_CRUISE = 1
+
+
+# GEAR_STALK (0xC7) byte 1 is an enumerated position, always a multiple of 15.
+# Measured across 59494 frames: 1 rest, 3 soft UP, 4 hard UP, 5 soft DOWN, 6 hard
+# DOWN. Every stock-ACC engagement in our captures was preceded by a hard DOWN;
+# soft DOWN appeared 9 times and never once with cruise engaged, so the stock ACC
+# ignores it. That is what makes it usable as openpilot's own engage gesture.
+STALK_REST = 1
+STALK_SOFT_DOWN = 5
+STALK_HARD_DOWN = 6
 
 
 class CarControllerParams:

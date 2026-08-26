@@ -6,12 +6,17 @@
 // longitudinal). openpilot sends STEER_CMD (0x12b); everything else is RX.
 
 #define GWM_STEER_CMD     0x12bU  // TX to EPS: STEER_REQUEST angle command
+#define GWM_GEAR_STALK    0x0c7U  // RX: gear stalk position - engages openpilot
 #define GWM_STEER_ANGLE   0x0a1U  // RX: measured wheel angle + direction
 #define GWM_STEER_TORQUE  0x147U  // RX: driver torque
 #define GWM_WHEEL_SPEEDS  0x13bU  // RX: wheel speeds
 #define GWM_ACC           0x2abU  // RX: cruise state (camera bus)
 #define GWM_GAS           0x0b5U  // RX: gas pedal
 #define GWM_BRAKE         0x120U  // RX: brake pressed
+
+// openpilot owns engagement instead of following the stock ACC. Set when the port
+// runs pcmCruise=False. Without it this mode behaves exactly as before.
+#define GWM_FLAG_OP_CRUISE 1
 
 #define GWM_MAIN_BUS 0U
 // The forward camera transmits STEER_CMD, LATERAL_STATE and ACC. Once the relay
@@ -32,9 +37,35 @@
 // steering, and 449 at any point.
 #define GWM_DISENGAGE_TORQUE 450
 
+static bool gwm_op_cruise = false;
+static bool gwm_engage_prev = false;
+
 static void gwm_rx_hook(const CANPacket_t *msg) {
   if (msg->bus == GWM_MAIN_BUS) {
+    if (msg->addr == GWM_GEAR_STALK) {
+      // GEAR_STALK position, byte 1: bit 6 = DOWN, bit 4 = FURTHER. A SOFT down
+      // (down without further) is the gesture openpilot engages on - the stock ACC
+      // ignores it entirely, which is the whole point: it never engages, so it
+      // never chimes. A hard down is the stock ACC's own gesture and must NOT
+      // engage us, or both systems would drive at once.
+      //
+      // Requiring the car to be moving means a stationary gear shift cannot arm
+      // controls: DOWN is the same physical motion as R->N.
+      const bool soft_down = ((msg->data[1] & 0x40U) != 0U) && ((msg->data[1] & 0x10U) == 0U);
+      if (gwm_op_cruise) {
+        if (soft_down && !gwm_engage_prev && vehicle_moving) {
+          controls_allowed = true;
+        }
+      }
+      gwm_engage_prev = soft_down;
+    }
+
     if (msg->addr == GWM_STEER_ANGLE) {
+      // AP_CANCEL_COMMAND, byte 5 bit 6. Always exits controls, in either mode.
+      if ((msg->data[5] & 0x40U) != 0U) {
+        controls_allowed = false;
+      }
+
       int raw = (int)(((msg->data[1] & 0x3FU) << 7) | (msg->data[2] >> 1));  // STEERING_ANGLE, 0.1 deg
       int sign = ((msg->data[2] & 0x1U) != 0U) ? -1 : 1;                     // STEERING_DIRECTION, 1 = right
       update_sample(&angle_meas, raw * sign);
@@ -71,7 +102,9 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
   if ((msg->bus == GWM_CAM_BUS) && (msg->addr == GWM_ACC)) {
     // CRUISE_ENGAGED, byte 47 bit 4. Ground-truthed against seven labelled ACC and
     // ICC engagement runs. carstate reads this exact bit, so the two gates agree.
-    pcm_cruise_check(((msg->data[47] >> 4) & 1U) != 0U);
+    if (!gwm_op_cruise) {
+      pcm_cruise_check(((msg->data[47] >> 4) & 1U) != 0U);
+    }
   }
 }
 
@@ -109,7 +142,8 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
 }
 
 static safety_config gwm_init(uint16_t param) {
-  SAFETY_UNUSED(param);
+  gwm_op_cruise = GET_FLAG(param, GWM_FLAG_OP_CRUISE);
+  gwm_engage_prev = false;
   static const CanMsg GWM_TX_MSGS[] = {
     {GWM_STEER_CMD, GWM_MAIN_BUS, 64, .check_relay = true},
   };
@@ -121,6 +155,7 @@ static safety_config gwm_init(uint16_t param) {
     {.msg = {{GWM_STEER_TORQUE, GWM_MAIN_BUS, 64, 50U,  .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
     {.msg = {{GWM_GAS,          GWM_MAIN_BUS, 64, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
     {.msg = {{GWM_BRAKE,        GWM_MAIN_BUS, 64, 50U,  .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+    {.msg = {{GWM_GEAR_STALK,   GWM_MAIN_BUS, 8,  20U,  .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
     {.msg = {{GWM_ACC,          GWM_CAM_BUS,  64, 10U,  .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
   };
 
