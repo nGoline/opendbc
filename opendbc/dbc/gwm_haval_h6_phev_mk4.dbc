@@ -72,6 +72,14 @@ BO_ 683 ACC: 64 XXX
  SG_ ACC_SPEED_SELECTION : 183|8@0+ (1,0) [0|255] "kph" XXX
  SG_ CRUISE_ENGAGED : 380|1@0+ (1,0) [0|1] "" XXX
 
+BO_ 199 GEAR_STALK: 8 XXX
+ SG_ CRC : 7|8@0+ (1,0) [0|255] "" XXX
+ SG_ GEAR_STALK_POSITION : 15|8@0+ (1,0) [0|255] "" XXX
+ SG_ STALK_DOWN : 14|1@0+ (1,0) [0|1] "" XXX
+ SG_ STALK_UP : 13|1@0+ (1,0) [0|1] "" XXX
+ SG_ STALK_FURTHER : 12|1@0+ (1,0) [0|1] "" XXX
+ SG_ COUNTER : 59|4@0+ (1,0) [0|15] "" XXX
+
 BO_ 545 GEAR: 8 XXX
  SG_ GEAR_REAL : 61|2@0+ (1,0) [0|3] "" XXX
 
@@ -141,3 +149,9 @@ not engaged. Corroborates CRUISE_ENGAGED on the same drive; kept for diagnostics
 VAL_ 545 GEAR_REAL 0 "P" 1 "D" 2 "N" 3 "R" ;
 VAL_ 573 LKAS_STATE 5 "active" 2 "hands_on_required" 3 "drift_left" 4 "drift_right" ;
 VAL_ 683 CRUISE_STATE 1 "inactive" 2 "available" 3 "engaged" 5 "engaging_icc" ;
+
+CM_ SG_ 199 GEAR_STALK_POSITION "Enumerated stalk position, always a multiple of 15. Measured over 59494 frames: 1 rest, 3 soft UP, 4 hard UP, 5 soft DOWN, 6 hard DOWN. The stock ACC engages on HARD down - every stock engagement in our captures was preceded by one - and ignores SOFT down entirely, which appeared 9 times and never once with cruise engaged. Soft down is therefore usable as openpilot's own engage gesture without ever starting the stock ACC.";
+CM_ SG_ 199 STALK_DOWN "Set for both soft and hard down. Pair with STALK_FURTHER to tell them apart.";
+CM_ SG_ 199 STALK_FURTHER "The hard detent. DOWN+FURTHER is the stock ACC gesture; DOWN alone is ours.";
+CM_ SG_ 199 CRC "crc8 over bytes 1..7, poly 0x1D, init 0xC1. Verified 4000/4000.";
+VAL_ 199 GEAR_STALK_POSITION 15 "rest" 45 "soft_up" 60 "hard_up" 75 "soft_down" 90 "hard_down" ;

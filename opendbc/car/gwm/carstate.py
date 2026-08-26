@@ -35,6 +35,10 @@ class CarState(CarStateBase):
     self.eps_lka_active = False
     self.eps_fault_frames = 0
     self.disengage_frames = 0
+    # openpilot-owned engagement (pcmCruise=False) from the stalk
+    self.prev_soft_down = False
+    self.prev_gear_d = False
+    self.engage_latch = False
 
   def update(self, can_parsers) -> structs.CarState:
     cp = can_parsers[Bus.pt]
@@ -94,6 +98,28 @@ class CarState(CarStateBase):
     # separate main-on bit has been identified, so treat it as always available and
     # let cruiseState.enabled do the gating.
     ret.cruiseState.available = True
+
+    # --- openpilot's own engagement -----------------------------------------
+    # The stock ACC engages on a HARD down of the gear stalk and ignores a SOFT
+    # down completely. Engaging on the soft gesture means the stock ACC never
+    # runs, and it is the stock ACC's state machine that chimes on every override
+    # and cancel. The panda arms its own latch on the same gesture (gwm.h, gated
+    # on GwmSafetyFlags.OP_CRUISE) so the two gates cannot disagree.
+    #
+    # A soft down is the same physical motion as shifting R->N, and a hard down is
+    # N->D, so engagement is gated on the car already being in D for two
+    # consecutive frames and moving - otherwise selecting a gear would engage
+    # openpilot. The decision is latched at the gesture's rising edge so a slow
+    # press cannot be re-evaluated mid-way.
+    soft_down = bool(cp.vl['GEAR_STALK']['STALK_DOWN']) and not bool(cp.vl['GEAR_STALK']['STALK_FURTHER'])
+    gear_d = ret.gearShifter == GearShifter.drive and self.prev_gear_d
+    rising = soft_down and not self.prev_soft_down
+    if rising:
+      self.engage_latch = gear_d and abs(ret.vEgoRaw) > 0.5
+    # buttonEnable is a one-frame request, and must not fire against the brake
+    ret.buttonEnable = bool(rising and self.engage_latch and not ret.brakePressed)
+    self.prev_soft_down = soft_down
+    self.prev_gear_d = ret.gearShifter == GearShifter.drive
     ret.cruiseState.standstill = ret.standstill and ret.cruiseState.enabled
     # The stock ACC's set speed, which openpilot displays. Leaving this at -1 fed
     # openpilot a nonsense negative speed. ACC_SPEED_SELECTION is byte 22 of 0x2ab

@@ -2,7 +2,7 @@ from opendbc.car import CanBusBase, get_safety_config, structs
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.gwm.carcontroller import CarController
 from opendbc.car.gwm.carstate import CarState
-from opendbc.car.gwm.values import WHEEL_SPEED_FACTOR
+from opendbc.car.gwm.values import WHEEL_SPEED_FACTOR, GwmSafetyFlags
 
 STEER_CMD_ADDR = 0x12b
 
@@ -41,7 +41,14 @@ class CarInterface(CarInterfaceBase):
     #
     # The steering command (STEER_CMD, 0x12b) is gated frame-to-frame by two plain
     # CRC-8s that we recompute, so it can be sent without any key. See gwmcan.
+    # openpilot owns engagement instead of following the stock ACC, engaging on the
+    # soft-down stalk gesture the stock system ignores. That keeps the stock ACC
+    # from ever running, which is what stops it chiming on every override and
+    # cancel. The safety mode must be told, or it would still gate controls on the
+    # stock cruise bit and block every frame openpilot sends.
+    ret.pcmCruise = False
     ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.gwm)]
+    ret.safetyConfigs[0].safetyParam |= GwmSafetyFlags.OP_CRUISE.value
     ret.steerControlType = structs.CarParams.SteerControlType.angle
     ret.steerAtStandstill = True
 
