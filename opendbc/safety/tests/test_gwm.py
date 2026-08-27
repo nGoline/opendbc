@@ -343,3 +343,49 @@ class TestGwmNoLongitudinalSafety(common.SafetyTestBase):
     self.safety.set_controls_allowed(True)
     dat = bytearray(64); dat[9] = 12
     self.assertFalse(self._tx(libsafety_py.make_CANPacket(0x143, self.MAIN_BUS, bytes(dat))))
+
+
+class TestGwmLongitudinalEncoding(common.SafetyTestBase):
+  """The builder's output must satisfy the safety mode's own checks.
+
+  These two disagreed on units once: the control law works in raw field counts and
+  a brake magnitude below the off baseline, while the builder was additionally
+  applying the DBC offsets. Brake-off went out as raw 181 instead of 140, which
+  reads as a live brake demand while commanding gas, and the panda rejected every
+  frame. Nothing short of an end-to-end check caught it.
+  """
+  MAIN_BUS = 0
+  TX_MSGS = [[STEER_CMD, 0], [0x143, 0]]
+
+  def setUp(self):
+    self.packer = CANPackerSafety("gwm_haval_h6_phev_mk4")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm,
+                                 GwmSafetyFlags.OP_CRUISE | GwmSafetyFlags.LONG_CONTROL)
+    self.safety.init_tests()
+
+  def _built(self, gas_raw, brake_mag, braking, active=True):
+    from opendbc.car.gwm.gwmcan import create_longitudinal_command
+    stock = bytes(bytearray(64))
+    return create_longitudinal_command(stock, gas_raw, brake_mag, braking, active)
+
+  def test_brake_off_goes_out_as_the_cars_own_baseline(self):
+    d = self._built(500, 0, False)
+    self.assertEqual(d[13], 140, "brake-off must be raw 140, the value the camera sends")
+
+  def test_gas_encodes_as_raw_counts(self):
+    for gas in (0, 500, 1702, 2400):
+      d = self._built(gas, 0, False)
+      self.assertEqual(((d[27] & 0x1F) << 8) | d[28], gas)
+
+  def test_brake_magnitude_encodes_below_the_baseline(self):
+    for mag in (0, 10, 53):
+      d = self._built(0, mag, True)
+      self.assertEqual(140 - d[13], mag)
+
+  def test_built_frames_pass_the_safety_mode(self):
+    self.safety.set_controls_allowed(True)
+    for gas, mag, braking in ((0, 0, False), (500, 0, False), (2400, 0, False), (0, 53, True)):
+      d = self._built(gas, mag, braking)
+      self.assertTrue(self._tx(libsafety_py.make_CANPacket(0x143, self.MAIN_BUS, d)),
+                      f"builder output rejected: gas={gas} mag={mag} braking={braking}")

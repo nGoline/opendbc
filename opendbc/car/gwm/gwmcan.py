@@ -105,13 +105,12 @@ def create_steer_command(stock_frame: bytes, apply_angle: float, active: bool) -
 ACC_CRC_BLOCKS = ((0, 1, 8, 0xF9), (8, 9, 16, 0x73), (16, 17, 24, 0x3F), (24, 25, 32, 0x79))
 ACC_COUNTERS = (7, 15, 23, 31)
 
-BRAKE_CMD_OFFSET = -181
-GAS_CMD_OFFSET = -192
-
-# The brake-OFF baseline the camera sends for the whole time it is in gas mode.
-# Leaving BRAKE_CMD at 0 in gas mode sends a non-off brake value, which is braking
-# and accelerating at once.
-BRAKE_CMD_OFF = -41
+# BRAKE_CMD's OFF baseline as it appears ON THE WIRE. The camera sends exactly
+# this in every frame where it is inactive or commanding gas - 140 in all 36k such
+# frames. The DBC offset of -181 makes that read as -41 when decoded, but this
+# builder works in RAW field units throughout to avoid mixing the two: the control
+# law is fitted against raw counts, so raw is what it hands us.
+BRAKE_OFF_RAW = 140
 
 REQ_GAS = 12
 REQ_BRAKE = 13
@@ -128,23 +127,28 @@ def _set_brake_gas_state(d: bytearray, braking: bool) -> None:
     d[12] |= 0x80
 
 
-def create_longitudinal_command(stock_frame: bytes, gas: int, brake: int, braking: bool,
-                                active: bool) -> bytes:
+def create_longitudinal_command(stock_frame: bytes, gas_raw: int, brake_mag: int,
+                                braking: bool, active: bool) -> bytes:
   """Patch the camera's ACC_CMD with our gas/brake demand, counters and CRCs.
 
-  `gas` and `brake` are raw CAN units, already mapped from the requested
-  acceleration by the caller. When inactive the camera's own demand is left alone
-  and only the counters and CRCs are refreshed.
+  UNITS. `gas_raw` is the GAS_CMD field exactly as it goes on the wire, and
+  `brake_mag` is how far BELOW the off baseline to pull BRAKE_CMD, so zero means
+  brake off. Both are what the fitted control law produces. Applying the DBC
+  offsets here as well put brake-off on the wire as raw 181 instead of 140, which
+  reads as a live brake demand while commanding gas - the panda rejected every
+  frame, correctly.
+
+  When inactive the camera's own demand is left alone and only the counters and
+  CRCs are refreshed.
   """
   d = bytearray(stock_frame)
 
   if active:
     d[9] = (d[9] & 0xE0) | (REQ_BRAKE if braking else REQ_GAS)
 
-    braw = max(0, min(0xFF, brake - BRAKE_CMD_OFFSET))
-    d[13] = braw
+    d[13] = max(0, min(0xFF, BRAKE_OFF_RAW - brake_mag))
 
-    graw = max(0, min(0x1FFF, gas - GAS_CMD_OFFSET))
+    graw = max(0, min(0x1FFF, gas_raw))
     d[27] = (d[27] & 0xE0) | ((graw >> 8) & 0x1F)
     d[28] = graw & 0xFF
 
