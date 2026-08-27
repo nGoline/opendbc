@@ -1,9 +1,10 @@
 from opendbc.can.parser import CANParser
-from opendbc.car import Bus, CanBusBase, structs
+from opendbc.car import Bus, CanBusBase, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.gwm.values import DBC, CarControllerParams
 
+ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
 
 GEAR_MAP = {
@@ -37,6 +38,7 @@ class CarState(CarStateBase):
     self.disengage_frames = 0
     # openpilot-owned engagement (pcmCruise=False) from the stalk
     self.engage_request = False
+    self.prev_cancel = 0
     self.prev_soft_down = False
     self.prev_gear_d = False
     self.engage_latch = False
@@ -132,6 +134,19 @@ class CarState(CarStateBase):
     self.engage_request = bool(rising and self.engage_latch and not ret.brakePressed)
     self.prev_soft_down = soft_down
     self.prev_gear_d = ret.gearShifter == GearShifter.drive
+
+    # Stalk UP cancels. The panda drops controls_allowed on this same bit, so
+    # openpilot has to see it too - otherwise the panda disengages, openpilot does
+    # not, and two seconds later controlsMismatch throws a red screen. That is what
+    # happened on 2026-08-27: AP_CANCEL went high at t=293.07, the panda dropped
+    # controls at 293.13, and openpilot stayed enabled until 295.12.
+    #
+    # Keyed on the cancel bit rather than the stalk position, because both the soft
+    # and hard UP gestures set it. car_specific turns a cancel ButtonEvent into
+    # buttonCancel on either edge when pcmCruise is False.
+    cancel = int(bool(cp.vl['STEER_ANGLE']['AP_CANCEL_COMMAND']))
+    ret.buttonEvents = create_button_events(cancel, self.prev_cancel, {1: ButtonType.cancel})
+    self.prev_cancel = cancel
     ret.cruiseState.standstill = ret.standstill and ret.cruiseState.enabled
     # The stock ACC's set speed, which openpilot displays. Leaving this at -1 fed
     # openpilot a nonsense negative speed. ACC_SPEED_SELECTION is byte 22 of 0x2ab

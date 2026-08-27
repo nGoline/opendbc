@@ -41,6 +41,8 @@ BO_ 161 STEER_ANGLE: 8 XXX
  SG_ STEERING_DIRECTION : 16|1@0+ (1,0) [0|1] "" XXX
  SG_ STEERING_RATE : 29|12@0+ (0.004,0) [0|16.38] "deg/s" XXX
  SG_ RATE_DIRECTION : 33|2@0+ (1,0) [0|3] "" XXX
+ SG_ AP_CANCEL_COMMAND : 46|1@0+ (1,0) [0|1] "" XXX
+ SG_ AP_ENABLE_COMMAND : 47|1@0+ (1,0) [0|1] "" XXX
  SG_ COUNTER : 59|4@0+ (1,0) [0|15] "" XXX
 
 BO_ 315 WHEEL_SPEEDS: 64 XXX
@@ -155,3 +157,5 @@ CM_ SG_ 199 STALK_DOWN "Set for both soft and hard down. Pair with STALK_FURTHER
 CM_ SG_ 199 STALK_FURTHER "The hard detent. DOWN+FURTHER is the stock ACC gesture; DOWN alone is ours.";
 CM_ SG_ 199 CRC "crc8 over bytes 1..7, poly 0x1D, init 0xC1. Verified 4000/4000.";
 VAL_ 199 GEAR_STALK_POSITION 15 "rest" 45 "soft_up" 60 "hard_up" 75 "soft_down" 90 "hard_down" ;
+CM_ SG_ 161 AP_CANCEL_COMMAND "Stalk UP cancel, byte 5 bit 6. Set by both the soft and hard UP gestures. Verified against our captures: present before a stock cruise on->off transition, and on 2026-08-27 it went high 0.07 s after the driver moved the stalk up.";
+CM_ SG_ 161 AP_ENABLE_COMMAND "Stalk enable request, byte 5 bit 7. Every stock cruise off->on transition in our captures had it in the prior second. openpilot does not engage on this - it uses the soft-down GEAR_STALK gesture the stock ACC ignores.";
