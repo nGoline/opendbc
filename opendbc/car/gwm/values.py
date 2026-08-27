@@ -110,6 +110,46 @@ class CarControllerParams:
   DISENGAGE_TORQUE = 400
   DISENGAGE_FRAMES = 5   # ~50 ms sustained, so a single spike cannot disengage
 
+  # --- longitudinal ------------------------------------------------------
+  # Feedforward FITTED to the car's own behaviour: over 18116 frames where the
+  # camera commanded gas and 4310 where it braked, regressing the pedal it chose
+  # against the acceleration that resulted 0.3 s later gives
+  #
+  #   gas_raw   =  1177*accel + 5.8*v + 12892*sin(pitch) + 1110   (R2 0.79)
+  #   brake_mag = -18.4*accel - 0.08*v +     0*sin(pitch) +  1.6  (R2 0.88)
+  #
+  # The grade term is the one that matters for smoothness, and it validates
+  # itself: if it really is gravity it should equal GAS_PER_ACCEL * 9.81 = 11546,
+  # and the fit independently found 12892. Feeding it forward means the
+  # integrator starts near the right pedal on a hill instead of having to
+  # discover it, which is what a driver does by feel.
+  #
+  # CAVEAT: the fitting drive was grade-biased (mostly downhill), so the constant
+  # and speed terms are less trustworthy than the accel and grade gains. The
+  # integrator absorbs the residual; expect to revisit these after a hilly drive.
+  GAS_PER_ACCEL = 1177.0     # raw counts per m/s^2
+  GAS_PER_SPEED = 5.8        # raw counts per m/s, drag and rolling resistance
+  GAS_BASE = 1110.0          # raw counts at zero accel, zero speed, flat
+  BRAKE_PER_ACCEL = 18.4     # magnitude counts per m/s^2 of deceleration
+  BRAKE_BASE = 1.6
+  # NOTE the brake fit's grade coefficient came out at ~0, so the brake magnitude
+  # is set by the target deceleration ALONE. Feeding the grade in here as well
+  # over-braked by 0.88 m/s^2 against the camera's own commands.
+
+  # Gas and brake are mutually exclusive on this car - the camera never commands
+  # both - so a deadband decides which. Hysteresis keeps a demand hovering near
+  # zero from flapping between pedals.
+  # MEASURED, not chosen. Sweeping the threshold against 26344 frames where the
+  # camera was commanding, -0.98 on (accel + grade) reproduces its gas-vs-brake
+  # choice 93.9% of the time; thresholding on accel alone tops out at 83%, so the
+  # grade belongs in this decision even though it does not belong in the brake
+  # magnitude. A first guess of -0.10 agreed only 34.7% of the time.
+  LIFT_OFF_ACCEL = -1.00     # below this (grade included) we brake
+  RESUME_GAS_ACCEL = -0.80   # above this we go back to gas
+
+  ACCEL_MIN = -3.5           # m/s^2
+  ACCEL_MAX = 2.0            # m/s^2
+
   # EPS_FAULT_PERMANENT toggles spuriously in normal operation, so it only counts
   # as a fault once it has been continuously set for ~1 s.
   EPS_FAULT_FRAMES = 100

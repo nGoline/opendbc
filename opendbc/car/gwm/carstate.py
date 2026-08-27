@@ -33,6 +33,7 @@ class CarState(CarStateBase):
     # the camera's last raw STEER_CMD (0x12b) frame, stashed by the interface so
     # the controller can patch it. None until the camera is first heard.
     self.stock_steer_cmd = None
+    self.stock_acc_cmd = None
     self.eps_lka_active = False
     self.eps_fault_frames = 0
     self.disengage_frames = 0

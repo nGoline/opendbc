@@ -5,6 +5,7 @@ from opendbc.car.gwm.carstate import CarState
 from opendbc.car.gwm.values import WHEEL_SPEED_FACTOR, GwmSafetyFlags
 
 STEER_CMD_ADDR = 0x12b
+ACC_CMD_ADDR = 0x143
 
 
 class CarInterface(CarInterfaceBase):
@@ -29,8 +30,12 @@ class CarInterface(CarInterfaceBase):
     # shows up as canError plus processNotRunning rather than as anything car-shaped.
     for _, msgs in can_packets:
       for addr, dat, src in msgs:
-        if addr == STEER_CMD_ADDR and src == self.cam_bus:
+        if src != self.cam_bus:
+          continue
+        if addr == STEER_CMD_ADDR:
           self.CS.stock_steer_cmd = bytes(dat)
+        elif addr == ACC_CMD_ADDR:
+          self.CS.stock_acc_cmd = bytes(dat)
     return super().update(can_packets)
 
   @staticmethod
@@ -67,7 +72,28 @@ class CarInterface(CarInterfaceBase):
     ret.wheelSpeedFactor = WHEEL_SPEED_FACTOR
     ret.radarUnavailable = True
 
-    # Longitudinal stays with the stock ACC for now, so engagement follows it.
-    ret.alphaLongitudinalAvailable = False
+    # Longitudinal is opt-in behind the alpha toggle. With openpilot owning cruise
+    # the stock ACC is not running, so if openpilot does not command speed then
+    # nothing does and the driver is on the pedals.
+    ret.alphaLongitudinalAvailable = True
+    ret.openpilotLongitudinalControl = alpha_long
+    if alpha_long:
+      ret.safetyConfigs[0].safetyParam |= GwmSafetyFlags.LONG_CONTROL.value
+
+      # 0.3 s, measured: the camera's brake command leads the resulting
+      # deceleration by that much, peaking at r=0.79 across a lag sweep.
+      ret.longitudinalActuatorDelay = 0.3
+
+      # The feedforward is fitted from the car's own behaviour and lands within
+      # ~0.19 m/s^2 RMS of what the camera commands, so the integrator only has to
+      # trim rather than discover the pedal. Scheduled by speed as honda and gm do;
+      # an earlier port used a single unscheduled 0.4 and hunted.
+      ret.longitudinalTuning.kiBP = [0., 5., 35.]
+      ret.longitudinalTuning.kiV = [1.0, 0.7, 0.5]
+
+      ret.vEgoStopping = 0.25
+      ret.vEgoStarting = 0.25
+      ret.stopAccel = 0.0
+      ret.stoppingDecelRate = 0.8
 
     return ret
