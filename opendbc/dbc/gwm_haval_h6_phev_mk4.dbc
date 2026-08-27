@@ -65,6 +65,23 @@ BO_ 299 STEER_CMD: 64 XXX
  SG_ EPS_LKAS_ANGLE_CFG : 183|8@0+ (1,0) [0|255] "" XXX
  SG_ COUNTER_2 : 184|4@1+ (1,0) [0|15] "" XXX
 
+BO_ 323 ACC_CMD: 64 XXX
+ SG_ CRC_0 : 7|8@0+ (1,0) [0|255] "" XXX
+ SG_ COUNTER_0 : 59|4@0+ (1,0) [0|15] "" XXX
+ SG_ CRC_BRAKE : 71|8@0+ (1,0) [0|255] "" XXX
+ SG_ BRAKE_OR_GAS_REQ : 76|5@0+ (1,0) [0|31] "" XXX
+ SG_ BRAKE_GAS_STATE_2 : 87|18@0+ (1,0) [0|262143] "" XXX
+ SG_ STANDSTILL : 101|1@0+ (1,0) [0|1] "" XXX
+ SG_ BRAKE_CMD : 111|8@0+ (1,-181) [-181|74] "" XXX
+ SG_ SPEED_REAL : 119|8@0+ (1,0) [0|255] "" XXX
+ SG_ COUNTER_BRAKE : 123|4@0+ (1,0) [0|15] "" XXX
+ SG_ CRC_2 : 135|8@0+ (1,0) [0|255] "" XXX
+ SG_ COUNTER_2 : 187|4@0+ (1,0) [0|15] "" XXX
+ SG_ CRC_ACC : 199|8@0+ (1,0) [0|255] "" XXX
+ SG_ GAS_CMD : 220|13@0+ (1,-192) [-192|4095] "" XXX
+ SG_ BRAKE_GAS_STATE : 239|20@0+ (1,0) [0|1048575] "" XXX
+ SG_ COUNTER_ACC : 251|4@0+ (1,0) [0|15] "" XXX
+
 BO_ 573 LATERAL_STATE: 64 XXX
  SG_ LKAS_STATE : 141|3@0+ (1,0) [0|7] "" XXX
 
@@ -159,3 +176,9 @@ CM_ SG_ 199 CRC "crc8 over bytes 1..7, poly 0x1D, init 0xC1. Verified 4000/4000.
 VAL_ 199 GEAR_STALK_POSITION 15 "rest" 45 "soft_up" 60 "hard_up" 75 "soft_down" 90 "hard_down" ;
 CM_ SG_ 161 AP_CANCEL_COMMAND "Stalk UP cancel, byte 5 bit 6. Set by both the soft and hard UP gestures. Verified against our captures: present before a stock cruise on->off transition, and on 2026-08-27 it went high 0.07 s after the driver moved the stalk up.";
 CM_ SG_ 161 AP_ENABLE_COMMAND "Stalk enable request, byte 5 bit 7. Every stock cruise off->on transition in our captures had it in the prior second. openpilot does not engage on this - it uses the soft-down GEAR_STALK gesture the stock ACC ignores.";
+CM_ BO_ 323 "The camera's longitudinal command. FOUR independent CRC blocks, each covering the seven bytes after its check byte, all poly 0x1D - byte0 init 0xF9 over 1..7, byte8 init 0x73 over 9..15, byte16 init 0x3F over 17..23, byte24 init 0x79 over 25..31. Each block ends with a counter nibble at bytes 7, 15, 23, 31. Verified 4000/4000 per block against captured frames. Bytes 56-63 are a MAC and are copied through untouched, as in STEER_CMD.";
+CM_ SG_ 323 BRAKE_OR_GAS_REQ "12 = commanding gas, 13 = commanding brake, 8 and 4 = inactive (driver driving), 20 = engaged while the driver is on the accelerator. Measured over 44k frames: 12 and 13 occur only with cruise on, 8 and 4 only with it off, and 20 with cruise on and the throttle pressed 99.7% of the time.";
+CM_ SG_ 323 BRAKE_CMD "Brake demand, offset -181. -41 is the brake-OFF baseline the camera sends throughout gas mode; more negative is more braking.";
+CM_ SG_ 323 GAS_CMD "Throttle demand, offset -192. Spans byte 27 low 5 bits plus byte 28.";
+CM_ SG_ 323 BRAKE_GAS_STATE "The powertrain reads brake-vs-gas STATE from here and from BRAKE_GAS_STATE_2, NOT from BRAKE_OR_GAS_REQ. Regeneration keys off this, so a brake request on top of a copied gas state is a combination the OEM never sends and the motor stays in drive.";
+CM_ SG_ 323 SPEED_REAL "UNVERIFIED. Named by an earlier port as km/h, but our captures show only 6 distinct values and byte14=96 spans 48-101 km/h, so it is not the current speed. Do not rely on it.";
