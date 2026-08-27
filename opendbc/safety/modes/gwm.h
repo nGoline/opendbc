@@ -7,6 +7,7 @@
 
 #define GWM_STEER_CMD     0x12bU  // TX to EPS: STEER_REQUEST angle command
 #define GWM_GEAR_STALK    0x0c7U  // RX: gear stalk position - engages openpilot
+#define GWM_ACC_CMD       0x143U  // TX: longitudinal - GAS_CMD / BRAKE_CMD
 #define GWM_STEER_ANGLE   0x0a1U  // RX: measured wheel angle + direction
 #define GWM_STEER_TORQUE  0x147U  // RX: driver torque
 #define GWM_WHEEL_SPEEDS  0x13bU  // RX: wheel speeds
@@ -17,6 +18,14 @@
 // openpilot owns engagement instead of following the stock ACC. Set when the port
 // runs pcmCruise=False. Without it this mode behaves exactly as before.
 #define GWM_FLAG_OP_CRUISE 1
+// openpilot drives longitudinal. Without it ACC_CMD is not transmittable at all.
+#define GWM_FLAG_LONG_CONTROL 2
+
+// BRAKE_CMD's OFF baseline. The camera sends exactly this for the whole time it is
+// in gas mode and whenever it is inactive - 140 in every one of 36k such frames.
+// Braking is expressed here as the magnitude BELOW that baseline so that "off" is
+// zero, which is what longitudinal_brake_checks expects.
+#define GWM_BRAKE_OFF_RAW 140
 
 #define GWM_MAIN_BUS 0U
 // The forward camera transmits STEER_CMD, LATERAL_STATE and ACC. Once the relay
@@ -38,6 +47,7 @@
 #define GWM_DISENGAGE_TORQUE 450
 
 static bool gwm_op_cruise = false;
+static bool gwm_long = false;
 static bool gwm_engage_prev = false;
 
 static void gwm_rx_hook(const CANPacket_t *msg) {
@@ -128,6 +138,49 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
     .wheelbase = 2.738,
   };
 
+  if (msg->addr == GWM_ACC_CMD) {
+    // Envelope measured off the camera over 44k frames. Its hardest braking is 53
+    // below the off baseline (p99 35) and its largest gas request is 2278 raw
+    // (p99 1765), so these sit just above what the stock system ever asks for.
+    //
+    // A conservative brake ceiling is safe here: this port does not touch AEB, so
+    // the car's own emergency braking is unaffected by our limit.
+    static const LongitudinalLimits GWM_LONG_LIMITS = {
+      .max_gas = 2500,
+      .min_gas = 0,
+      .inactive_gas = 0,
+      .max_brake = 60,
+    };
+
+    const int req = msg->data[9] & 0x1FU;
+    const int gas = (int)(((msg->data[27] & 0x1FU) << 8) | msg->data[28]);
+    const int brake = GWM_BRAKE_OFF_RAW - (int)msg->data[13];
+
+    if (!gwm_long) {
+      tx = false;    // not our message to send unless openpilot owns longitudinal
+    } else {
+      bool violation = false;
+      violation |= longitudinal_gas_checks(gas, GWM_LONG_LIMITS);
+      violation |= longitudinal_brake_checks(brake, GWM_LONG_LIMITS);
+
+      // The stock system never commands both. In 44k frames, a gas request always
+      // carried the brake at its off baseline and a brake request always carried
+      // zero gas. Sending a combination the car never sees is how the powertrain
+      // ends up braking and accelerating at once.
+      if (req == 12) {          // GAS_REQ
+        violation |= brake != 0;
+      } else if (req == 13) {   // BRAKE_REQ
+        violation |= gas != 0;
+      } else {
+        violation |= (gas != 0) || (brake != 0);
+      }
+
+      if (violation) {
+        tx = false;
+      }
+    }
+  }
+
   if (msg->addr == GWM_STEER_CMD) {
     int raw = (int)((msg->data[17] << 6) | (msg->data[18] >> 2));            // STEER_REQUEST
     int desired_angle = raw - GWM_STEER_ZERO;                               // centered, 0.1 deg
@@ -143,9 +196,14 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
 
 static safety_config gwm_init(uint16_t param) {
   gwm_op_cruise = GET_FLAG(param, GWM_FLAG_OP_CRUISE);
+  gwm_long = GET_FLAG(param, GWM_FLAG_LONG_CONTROL);
   gwm_engage_prev = false;
   static const CanMsg GWM_TX_MSGS[] = {
     {GWM_STEER_CMD, GWM_MAIN_BUS, 64, .check_relay = true},
+  };
+  static const CanMsg GWM_LONG_TX_MSGS[] = {
+    {GWM_STEER_CMD, GWM_MAIN_BUS, 64, .check_relay = true},
+    {GWM_ACC_CMD,   GWM_MAIN_BUS, 64, .check_relay = true},
   };
 
   // Frequencies measured off this car (route_c0 segment 40, 60 s).
@@ -159,7 +217,8 @@ static safety_config gwm_init(uint16_t param) {
     {.msg = {{GWM_ACC,          GWM_CAM_BUS,  64, 10U,  .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
   };
 
-  return BUILD_SAFETY_CFG(gwm_rx_checks, GWM_TX_MSGS);
+  return gwm_long ? BUILD_SAFETY_CFG(gwm_rx_checks, GWM_LONG_TX_MSGS)
+                  : BUILD_SAFETY_CFG(gwm_rx_checks, GWM_TX_MSGS);
 }
 
 const safety_hooks gwm_hooks = {

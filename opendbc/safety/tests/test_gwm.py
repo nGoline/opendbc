@@ -259,3 +259,87 @@ class TestGwmOpCruiseSafety(common.SafetyTestBase):
     for _ in range(10):
       self._rx(self.packer.make_can_msg_safety("ACC", self.CAM_BUS, values))
     self.assertFalse(self.safety.get_controls_allowed())
+
+
+class TestGwmLongitudinalSafety(common.SafetyTestBase):
+  """The longitudinal envelope, measured off the camera.
+
+  Its hardest braking is 53 below the off baseline and its largest gas request is
+  2278 raw, and it never commands gas and brake together - in 44k frames a gas
+  request always carried the brake at its off baseline and vice versa.
+  """
+  MAIN_BUS = 0
+  ACC_CMD = 0x143
+  BRAKE_OFF_RAW = 140
+  TX_MSGS = [[STEER_CMD, 0], [0x143, 0]]
+
+  def setUp(self):
+    self.packer = CANPackerSafety("gwm_haval_h6_phev_mk4")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm,
+                                 GwmSafetyFlags.OP_CRUISE | GwmSafetyFlags.LONG_CONTROL)
+    self.safety.init_tests()
+
+  def _acc_cmd(self, req: int, gas: int = 0, brake_mag: int = 0):
+    """gas is raw counts; brake_mag is magnitude BELOW the off baseline (0 = off)."""
+    dat = bytearray(64)
+    dat[9] = req
+    dat[13] = self.BRAKE_OFF_RAW - brake_mag
+    dat[27] = (gas >> 8) & 0x1F
+    dat[28] = gas & 0xFF
+    return libsafety_py.make_CANPacket(self.ACC_CMD, self.MAIN_BUS, bytes(dat))
+
+  def test_gas_within_limit_allowed(self):
+    self.safety.set_controls_allowed(True)
+    for gas in (0, 500, 1765, 2500):
+      self.assertTrue(self._tx(self._acc_cmd(12, gas=gas)), f"gas {gas} rejected")
+
+  def test_gas_above_limit_blocked(self):
+    self.safety.set_controls_allowed(True)
+    for gas in (2501, 3000, 4095):
+      self.assertFalse(self._tx(self._acc_cmd(12, gas=gas)), f"gas {gas} allowed")
+
+  def test_brake_within_limit_allowed(self):
+    self.safety.set_controls_allowed(True)
+    for mag in (0, 35, 53, 60):
+      self.assertTrue(self._tx(self._acc_cmd(13, brake_mag=mag)), f"brake {mag} rejected")
+
+  def test_brake_above_limit_blocked(self):
+    self.safety.set_controls_allowed(True)
+    for mag in (61, 80, 120):
+      self.assertFalse(self._tx(self._acc_cmd(13, brake_mag=mag)), f"brake {mag} allowed")
+
+  def test_never_gas_and_brake_together(self):
+    self.safety.set_controls_allowed(True)
+    self.assertFalse(self._tx(self._acc_cmd(12, gas=500, brake_mag=20)), "gas req with brake applied")
+    self.assertFalse(self._tx(self._acc_cmd(13, gas=500, brake_mag=20)), "brake req with gas applied")
+
+  def test_inactive_request_must_be_neutral(self):
+    self.safety.set_controls_allowed(True)
+    self.assertTrue(self._tx(self._acc_cmd(8)), "neutral inactive frame rejected")
+    self.assertFalse(self._tx(self._acc_cmd(8, gas=500)), "inactive req carrying gas")
+    self.assertFalse(self._tx(self._acc_cmd(8, brake_mag=20)), "inactive req carrying brake")
+
+  def test_no_gas_when_controls_not_allowed(self):
+    self.safety.set_controls_allowed(False)
+    self.assertFalse(self._tx(self._acc_cmd(12, gas=500)))
+    self.assertFalse(self._tx(self._acc_cmd(13, brake_mag=20)))
+    # a fully neutral frame is still fine
+    self.assertTrue(self._tx(self._acc_cmd(8)))
+
+
+class TestGwmNoLongitudinalSafety(common.SafetyTestBase):
+  """Without the LONG_CONTROL flag, ACC_CMD must not be transmittable at all."""
+  MAIN_BUS = 0
+  TX_MSGS = [[STEER_CMD, 0]]
+
+  def setUp(self):
+    self.packer = CANPackerSafety("gwm_haval_h6_phev_mk4")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, GwmSafetyFlags.OP_CRUISE)
+    self.safety.init_tests()
+
+  def test_acc_cmd_blocked_entirely(self):
+    self.safety.set_controls_allowed(True)
+    dat = bytearray(64); dat[9] = 12
+    self.assertFalse(self._tx(libsafety_py.make_CANPacket(0x143, self.MAIN_BUS, bytes(dat))))

@@ -15,6 +15,8 @@ class GwmSafetyFlags(IntFlag):
   # the stock ACC. Must be set whenever the port runs pcmCruise=False, or openpilot
   # would believe it is engaged while the panda blocks every frame.
   OP_CRUISE = 1
+  # openpilot drives longitudinal. Without it the panda will not transmit ACC_CMD.
+  LONG_CONTROL = 2
 
 
 # GEAR_STALK (0xC7) byte 1 is an enumerated position, always a multiple of 15.
